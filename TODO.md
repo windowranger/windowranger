@@ -20,6 +20,28 @@ smallest useful outcome and acceptance boundary.
 
 ## Done
 
+### WR-130 — Publish and time Stable 1.0.9
+
+- **Result:** Stable 1.0.9/build 22 is public and immutable at source
+  `223cbe461f8d0c05d29690d2a491fd34db6a0fcb`; all five GitHub assets passed verification.
+  The exact installed app, mounted DMG and ZIP matched across 71 files/links. Accessibility
+  was granted, the engine was running, and Ghostty was hidden after launch.
+- **Channels:** Website PR #26 deployed merge `de4dc02` (Cloudflare version
+  `575f4e49-b8fb-4415-a88c-1076dc8f97b3`). Both domains' HTML, active JavaScript and feed
+  matched that deployment; all 51 feed enclosures passed independent verification on each
+  domain. Tap PR #8 merged `682e3ef7`; candidate and installed named-tap style/online audits
+  passed. Source ledger PR #129 records build 22 as published.
+- **Verification:** 934 non-hosted app tests, full integration analysis/build/packaging,
+  app and DMG notarization, five website tests, and 27 focused coordinator tests passed.
+  The maintainer's full day without issues is live-use evidence, not a controlled delayed-wake
+  reproduction or proof that the separate Codex/Chrome fixed-size tiling diagnosis is resolved.
+- **Timing:** Request at 21:16:29Z, GitHub public at 21:52:57Z (36m27s), all channels verified
+  at 22:10:13Z (53m43s), before this tooling/record follow-up. Build/notarization took 5m21s.
+  This exceeds 1.0.8's 37m07s to channels and 43m01s including records; CI fixture repairs and
+  the migrated React-site adapter required additional work. No token savings were measured.
+  The original coordinator journal truthfully remains stopped at the old website layout;
+  manual fallback and read-only live verification have separate local evidence journals.
+
 ### WR-128 — Publish and time Stable 1.0.8
 
 - **Result:** Stable 1.0.8/build 21 is immutable on GitHub at source
@@ -310,17 +332,6 @@ smallest useful outcome and acceptance boundary.
   accepted flow keeps the palette open while the halo expands and returns Escape focus to search.
 
 ## Inbox
-
-### WR-130 — Publish and time Stable 1.0.9
-
-- **Status:** In progress; explicitly authorized on 7 September 2026 after the maintainer reported
-  a full day of use without issues in the installed Dev build.
-- **Scope:** WR-077 ongoing Quick App ownership reconciliation, WR-123 retained resize diagnostics,
-  and WR-129 release verification/channel automation. Build 22 reserved for Stable 1.0.9.
-- **Acceptance:** Exact packaged-app verification, immutable GitHub artifacts, signed live feed,
-  website and Homebrew channel verification, with elapsed time compared against 1.0.8's 43m01s.
-- **Live-use evidence:** Maintainer reports a full day without issues. This does not establish a
-  controlled delayed-wake reproduction or resolve the separate fixed-size tiling diagnosis.
 
 ### WR-125 — Investigate CLI peer-rejection process exit
 
@@ -3849,8 +3860,10 @@ smallest useful outcome and acceptance boundary.
 
 ### WR-129 — Reduce repetitive release verification and coordination
 
-- **Status:** Implemented and locally verified; uncommitted preparation, awaiting hosted integration
-  and the next authorized release measurement. No new release was published during this work.
+- **Status:** Integrated and exercised in the authorized 1.0.9 release. Hosted application,
+  analysis, packaging and distribution checks passed. The post-public coordinator stopped at
+  the migrated React website; that channel was completed through its existing build/deploy
+  commands, and a reviewed React adapter correction is included in this follow-up.
 - **Baseline:** 1.0.8 took 37m07s to all-channel verification and 43m01s including records.
   Source promotion took 17m07s; integration analysis/build took 4m40s/4m03s.
 - **Implemented:** Distinct PR/push check contexts, shared Release DerivedData, conservative
@@ -3861,10 +3874,14 @@ smallest useful outcome and acceptance boundary.
   receipt tests and channel failure/recovery tests. The local quick checkpoint passed all 932
   non-hosted app tests plus isolation and existing release workflow checks. Shell syntax, YAML
   parsing, review and a no-publication 1.0.8 configuration preview passed.
-- **Remaining boundary:** Merge before hosted CI can exercise the changed workflow. Full unsigned
-  analysis/build/DMG validation belongs to that integration checkpoint; no distributable build,
-  signing, deployment or live-app changes were performed. The next authorized release must
-  measure time/token impact before any savings claim. Instructions are in the release runbook.
+- **1.0.9 findings:** Corrected clean-runner fixture assumptions and pre-merge website/tap gates.
+  The React follow-up updates source references, validates rendered `dist/client` output, runs
+  the site's Node tests through `bun run test`, and verifies live deployment bytes. All 27
+  focused coordinator tests pass; the website's five rendered-output tests also pass.
+  Build and notarization took 5m21s, but the complete release exceeded the previous 43m01s
+  because of CI/tooling repairs and channel adaptation. No token-savings claim is supported.
+- **Remaining boundary:** A future authorized release must exercise the corrected coordinator
+  end to end without the manual React fallback. Instructions are in the release runbook.
 
 ### WR-126 — Preserve the focused diagnostic report through menu closure
 
