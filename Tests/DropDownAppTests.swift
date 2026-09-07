@@ -774,6 +774,85 @@ final class DropDownAppTests: XCTestCase {
         ))
     }
 
+    func testLateEligibleDiscoveryClaimDefersWithoutWritesOrShelfIntent() {
+        let parkedGhostty = DropDownAppStartupCandidate(
+            key: WindowKey(processIdentifier: 42, windowIdentifier: 100),
+            bundleIdentifier: "com.mitchellh.ghostty",
+            isMeaningfullyVisible: false,
+            wasHiddenByWindowRanger: false
+        )
+
+        // The initial refresh can be empty while Ghostty restores. Once a later authoritative
+        // scan finds its one eligible process group, discovery may claim Shelf ownership.
+        XCTAssertEqual(
+            QuickAppSessionReconciliationPolicy.disposition(
+                hasExistingSession: false,
+                performsAXWrites: true,
+                hasInFlightShelfIntent: false,
+                hasIgnoredVisibilityRecovery: false
+            ),
+            .claim
+        )
+        XCTAssertEqual(
+            DropDownAppStartupPolicy.selections(
+                bundleIdentifier: "com.mitchellh.ghostty",
+                candidates: [parkedGhostty]
+            )?.map(\.windowKey),
+            [parkedGhostty.key]
+        )
+
+        // Repeated refreshes keep the exact session; read-only/paused refreshes and direct
+        // toggles defer discovery so they cannot issue another hide request.
+        XCTAssertEqual(
+            QuickAppSessionReconciliationPolicy.disposition(
+                hasExistingSession: true,
+                performsAXWrites: true,
+                hasInFlightShelfIntent: false,
+                hasIgnoredVisibilityRecovery: false
+            ),
+            .preserveExisting
+        )
+        XCTAssertEqual(
+            QuickAppSessionReconciliationPolicy.disposition(
+                hasExistingSession: false,
+                performsAXWrites: false,
+                hasInFlightShelfIntent: false,
+                hasIgnoredVisibilityRecovery: false
+            ),
+            .deferred
+        )
+        XCTAssertEqual(
+            QuickAppSessionReconciliationPolicy.disposition(
+                hasExistingSession: false,
+                performsAXWrites: true,
+                hasInFlightShelfIntent: true,
+                hasIgnoredVisibilityRecovery: false
+            ),
+            .deferred
+        )
+        XCTAssertEqual(
+            QuickAppSessionReconciliationPolicy.disposition(
+                hasExistingSession: false,
+                performsAXWrites: true,
+                hasInFlightShelfIntent: false,
+                hasIgnoredVisibilityRecovery: true
+            ),
+            .deferred,
+            "The recovery pass must finish before automatic discovery can claim this bundle."
+        )
+
+        let otherProcess = DropDownAppStartupCandidate(
+            key: WindowKey(processIdentifier: 73, windowIdentifier: 101),
+            bundleIdentifier: "com.mitchellh.ghostty",
+            isMeaningfullyVisible: true,
+            wasHiddenByWindowRanger: false
+        )
+        XCTAssertNil(DropDownAppStartupPolicy.selections(
+            bundleIdentifier: "com.mitchellh.ghostty",
+            candidates: [parkedGhostty, otherProcess]
+        ))
+    }
+
     func testStartupRecoversOnlyTheExactWindowRangerHiddenQuickAppAsHidden() {
         let key = WindowKey(processIdentifier: 42, windowIdentifier: 100)
 

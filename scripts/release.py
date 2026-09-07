@@ -16,6 +16,8 @@ import hashlib
 import subprocess
 import sys
 import uuid
+import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -135,6 +137,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--commit", default="HEAD", help="Commit to bind into the journal (default: HEAD).")
     parser.add_argument("--execute", action="store_true", help="Run the selected stage and write its journal/logs.")
     parser.add_argument("--resume", action="store_true", help="Resume an existing journal with identical provenance.")
+    parser.add_argument("--verbose", action="store_true", help="Also print command output; full output is always saved in stage logs.")
     parser.add_argument("--repository-root", type=Path, default=Path(__file__).resolve().parents[1], help=argparse.SUPPRESS)
     parser.add_argument("--release-root", type=Path, help="Artifact root (default: REPOSITORY/.build/releases).")
     parser.add_argument("--notary-profile", help="Required by the build stage.")
@@ -215,29 +218,40 @@ def stage_commands(args: argparse.Namespace, repository_root: Path, release_root
     }
 
 
-def run_command(command: list[str], cwd: Path, log_path: Path, release_root: Path) -> None:
-    # Stream output to both the terminal and a durable stage log. Long notarization
-    # and upload waits remain observable without granting the runner retry authority.
+def run_command(command: list[str], cwd: Path, log_path: Path, release_root: Path, verbose: bool = False) -> None:
+    started = time.monotonic()
+    stopped = threading.Event()
+    def heartbeat() -> None:
+        while not stopped.wait(30):
+            print(f"Still running ({int(time.monotonic() - started)}s); log: {log_path}", flush=True)
+
+    print(f"Running {Path(command[0]).name}; log: {log_path}", flush=True)
     with log_path.open("w", encoding="utf-8") as log_file:
         log_file.write("$ " + " ".join(command) + "\n\n")
         environment = os.environ.copy()
         environment["WINDOWRANGER_RELEASE_ROOT"] = str(release_root)
         process = subprocess.Popen(command, cwd=cwd, env=environment, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         assert process.stdout is not None
+        monitor = threading.Thread(target=heartbeat, daemon=True)
+        monitor.start()
         try:
             for line in process.stdout:
                 log_file.write(line)
                 log_file.flush()
-                print(line, end="")
+                if verbose:
+                    print(line, end="", flush=True)
             returncode = process.wait()
         except KeyboardInterrupt:
             process.terminate()
             process.wait()
             raise
         finally:
+            stopped.set()
+            monitor.join()
             process.stdout.close()
     if returncode:
         raise ReleaseError(f"Stage command failed ({returncode}); inspect {log_path}")
+    print(f"Command succeeded in {time.monotonic() - started:.1f}s", flush=True)
 
 
 def require_local_manifest_binding(release_root: Path, version: str, build_number: str, commit: str) -> None:
@@ -341,7 +355,7 @@ def main(argv: list[str] | None = None) -> int:
                 journal["stages"][stage_name] = {"status": "running", "started_at": timestamp(), "command": command, "input_fingerprints": fingerprints, "log": str(log_path)}
                 write_json(journal_path, journal)
                 try:
-                    run_command(command, repository_root, log_path, release_root)
+                    run_command(command, repository_root, log_path, release_root, verbose=args.verbose)
                 except (ReleaseError, OSError, KeyboardInterrupt) as error:
                     journal["stages"][stage_name].update({"status": "failed", "finished_at": timestamp(), "error": str(error) or type(error).__name__})
                     write_json(journal_path, journal)

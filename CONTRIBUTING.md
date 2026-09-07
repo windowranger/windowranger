@@ -113,6 +113,12 @@ WindowRanger. Hook installation is deliberately local and opt-in because Git doe
 from a clone. Remove it with `./scripts/install-git-hooks.sh --remove`. If the clone already has a
 different `core.hooksPath`, the installer stops rather than overwriting it.
 
+Release/tooling checks always run. For a release-bookkeeping-only diff, a previous successful
+quick check may supply the application test result when its non-bookkeeping tree and toolchain
+match exactly. Dirty checkouts cannot create or reuse receipts. Unknown bases or any other change
+run the application tests. See the verification-reuse rules in
+[the release runbook](docs/first-github-release.md#verification-reuse).
+
 At an integration or release checkpoint, run the heavier local equivalent explicitly:
 
 ```sh

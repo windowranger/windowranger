@@ -9,7 +9,7 @@ final class FocusedWindowDiagnosticReportTests: XCTestCase {
         let second = FocusedWindowDiagnosticReport.render(snapshot())
 
         XCTAssertEqual(first, second)
-        XCTAssertTrue(first.hasPrefix("WindowRanger focused-window diagnostic report\nschema-version: 2\n"))
+        XCTAssertTrue(first.hasPrefix("WindowRanger focused-window diagnostic report\nschema-version: 3\n"))
         XCTAssertTrue(first.contains("displays-have-separate-spaces: true"))
         XCTAssertTrue(first.contains("target-status: managed"))
         XCTAssertTrue(first.contains("ax-focused: true"))

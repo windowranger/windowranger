@@ -274,6 +274,12 @@ otherwise invisible system context without changing the setting or treating it a
 They do not collect window titles, document names, URLs, typed content,
 full file paths, or window contents.
 
+Focused report schema 3 also retains the trigger for an active fixed-size recovery state: the
+classification time and source, resize outcome, available original/requested/observed frames,
+size baseline, last capability probe and current recovery gate. This evidence lasts as long as
+the recovery state, even when the failure happened during background layout without a command
+correlation. It adds no window writes and does not change when a window is floated or recovered.
+
 Copied diagnostics are line-safe and action-aware: the latest correlated hotkeys and their resulting
 focus/layout events are retained separately from the noisy file tail, so ordinary background polling
 cannot evict the trigger. Background layout enforcement is input-driven rather than timer-driven;
@@ -329,9 +335,11 @@ those windows stay outside normal workspace layout, reset, ordinary focus cyclin
 persistence. A newly admitted eligible same-process window joins its application's exact Shelf
 group; closing one member releases only that window while another member remains. Native-tab
 replacement may transfer the removed window's local restore state only through the existing exact,
-authoritative same-process handoff boundary. On startup, every eligible matching window from one
-process is claimed before ordinary workspace layout and the application begins hidden. Exact
-WindowRanger-owned windows whose application remains hidden retain that ownership. The hidden
+authoritative same-process handoff boundary. Whenever write-enabled discovery finds an eligible
+configured Quick App without Shelf ownership, it claims the application hidden before ordinary
+workspace layout. This also handles windows that arrive after startup or resume; existing presented
+Shelf sessions are left alone. Paused/read-only discovery and unresolved window state do not hide
+applications. Exact WindowRanger-owned windows whose application remains hidden retain that ownership. The hidden
 ownership marker is local to the current WindowServer session and is discarded rather than applied
 to a different window identity. Legacy minimized-window markers do not grant permission to unhide
 an application. Matching windows from multiple processes remain ambiguous and fail closed because

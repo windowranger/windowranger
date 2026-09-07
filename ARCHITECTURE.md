@@ -249,6 +249,15 @@ surfaces capture the same evidence once before they are discarded. The snapshot 
 titles or content-bearing metadata and does not itself change admission, membership, layout, focus,
 persistence, or recovery behaviour.
 
+Fixed-size recovery retains bounded, per-window demotion evidence in `FixedSizeRecoveryState`:
+seed reason/time, failed write source/result, available original/requested/observed geometry,
+baseline size, and last capability probe. Schema-3 focused reports render that retained evidence
+and the current pure recovery-gate decision before recent history. Release history contains only
+correlated commands and is bounded; it cannot serve as the source of truth for a background resize
+failure. Evidence shares the recovery state's removal/reset lifecycle and is not persisted or
+synced. Missing pre-write geometry remains explicitly unavailable. Reporting performs no probe or
+geometry write and does not relax fixed-size safety classification.
+
 The Add Application Rule picker reads existing engine membership without refreshing or mutating
 windows. Open apps are presented separately from other installed apps. A new rule inherits a live
 workspace only when every currently managed window for that bundle agrees on one workspace;
@@ -472,10 +481,15 @@ ordinary workspace layout moves it. The watchdog checks eight times after a shor
 fails with explicit feedback; a profile change, shutdown, newer launch generation, missing
 installation, launch error, timeout, or multiple matching processes never grants permission to
 guess a target.
-During startup reconciliation, the engine establishes ownership only for configured shelf entries
-before initial workspace visibility and layout. Every configured entry whose eligible windows come
-from one process is claimed hidden, regardless of pre-launch visibility; launching WindowRanger
-never implicitly presents a Shelf entry. Crash-restart recovery may reclaim a hidden application
+During ordinary write-enabled discovery, the engine reconciles missing ownership for configured Shelf
+entries before workspace visibility and layout. This includes startup, windows discovered after an
+empty or unavailable initial scan, and later wake recovery. Every unowned configured entry whose
+eligible windows come from one process is claimed hidden; discovery never implicitly presents it.
+Existing sessions retain their visibility and membership handling. Paused/read-only discovery,
+unavailable displays, active Shelf transitions, and deferred windows do not authorize a new hide.
+Ignored-session visibility recovery also suppresses automatic claims for that bundle through the
+current scan, even when its unhide confirmation finishes synchronously.
+Exact pending hidden ownership survives an empty scan so crash-restart recovery may reclaim an application
 only when the WindowServer-bound marker matches the exact owned window identities and bundle and
 AppKit still reports that application hidden. Same-bundle candidates from multiple processes remain
 untouched. Newly admitted same-process windows join the exact application group, and an
