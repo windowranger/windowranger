@@ -64,6 +64,13 @@ After the exact GitHub release is public and immutable, `scripts/release-channel
 the published ledger, website/feed PR and deployment, live verification, and Homebrew PR/audit.
 It uses dedicated worktrees and records its progress under `.build/release-channel-runs/`.
 It does not allocate a build, promote application source, publish GitHub, or install the app.
+The website adapter supports the React source site and its `dist/client` deployment, as well
+as the older compiled `public` layout. It builds before running `bun run test`, checks the
+rendered release link and label, and compares live HTML, JavaScript and feed bytes against
+the merged deployment. Use `bun run test`, not Bun's separate built-in test runner.
+For Homebrew, `tap_repository` may be the same path as `named_tap_checkout`; otherwise their
+origin URLs must match exactly. The named tap must be clean. Candidate style and online audit
+checks run before the tap PR is created or merged, with the original cask restored afterward.
 
 Create a local JSON configuration with the selected release's real paths and full commit:
 
