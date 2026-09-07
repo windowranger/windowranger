@@ -3196,6 +3196,132 @@ final class WorkspaceDefinitionTests: XCTestCase {
         }
     }
 
+    func testFixedSizeRecoveryRetainsDemotionProvenanceAcrossObservationAndProbeGates() {
+        let start = Date(timeIntervalSinceReferenceDate: 100)
+        let core = WindowAdmissionMetadata(
+            bundleIdentifier: "com.example.FixedSizeRecovery",
+            role: kAXWindowRole as String,
+            subrole: kAXStandardWindowSubrole as String,
+            windowLayer: 0,
+            isMinimized: false,
+            fullscreenButton: .present,
+            closeButton: .present
+        )
+        let originalFrame = WindowFrame(
+            position: CGPoint(x: 10, y: 20),
+            size: CGSize(width: 400, height: 300)
+        )
+        let requestedFrame = WindowFrame(
+            position: CGPoint(x: 30, y: 40),
+            size: CGSize(width: 640, height: 480)
+        )
+        let observedFailureFrame = WindowFrame(
+            position: CGPoint(x: 10, y: 20),
+            size: CGSize(width: 400, height: 300)
+        )
+        var rejected = FixedSizeRecoveryState.seeded(
+            observedSize: observedFailureFrame.size,
+            reason: .ineffectiveResize,
+            source: "frame-application",
+            resizeResult: WindowFrameWriteResult.initialSizeRejected.diagnosticValue,
+            originalFrame: originalFrame,
+            requestedFrame: requestedFrame,
+            observedFrameAtFailure: observedFailureFrame,
+            now: start
+        )
+
+        XCTAssertEqual(rejected.seededReason, .ineffectiveResize)
+        XCTAssertEqual(rejected.source, "frame-application")
+        XCTAssertEqual(rejected.resizeResult, "initial-size-rejected")
+        XCTAssertEqual(rejected.originalFrame, originalFrame)
+        XCTAssertEqual(rejected.requestedFrame, requestedFrame)
+        XCTAssertEqual(rejected.observedFrameAtFailure, observedFailureFrame)
+        XCTAssertEqual(rejected.seededAt, start)
+        XCTAssertEqual(rejected.recoveryGate(
+            coreMetadata: core,
+            observedSize: observedFailureFrame.size,
+            isVisibleActive: true,
+            isPaused: false,
+            now: start.addingTimeInterval(6)
+        ), .sizeUnchanged)
+
+        let changedSize = CGSize(width: 640, height: 480)
+        XCTAssertEqual(rejected.recoveryGate(
+            allowsCapabilityRecheck: false,
+            coreMetadata: core,
+            observedSize: changedSize,
+            isVisibleActive: true,
+            isPaused: false,
+            now: start.addingTimeInterval(6)
+        ), .admissionNoLongerFixedSize)
+        XCTAssertEqual(rejected.recoveryGate(
+            coreMetadata: core,
+            observedSize: changedSize,
+            isVisibleActive: false,
+            isPaused: false,
+            now: start.addingTimeInterval(6)
+        ), .notVisibleActive)
+        XCTAssertEqual(rejected.recoveryGate(
+            coreMetadata: core,
+            observedSize: changedSize,
+            isVisibleActive: true,
+            isPaused: false,
+            now: start.addingTimeInterval(4)
+        ), .cooldown)
+        XCTAssertEqual(rejected.recoveryGate(
+            coreMetadata: core,
+            observedSize: changedSize,
+            isVisibleActive: true,
+            isPaused: false,
+            now: start.addingTimeInterval(6)
+        ), .eligible)
+
+        XCTAssertFalse(rejected.recordCapabilityProbe(
+            positionSettable: .trueValue,
+            sizeSettable: .falseValue,
+            now: start.addingTimeInterval(6)
+        ))
+        XCTAssertEqual(rejected.baselineSize, observedFailureFrame.size)
+        XCTAssertEqual(rejected.lastCapabilityProbeDate, start.addingTimeInterval(6))
+        XCTAssertEqual(rejected.lastCapabilityProbeResult, "position-true,size-false")
+        XCTAssertEqual(rejected.recoveryGate(
+            coreMetadata: core,
+            observedSize: changedSize,
+            isVisibleActive: true,
+            isPaused: false,
+            now: start.addingTimeInterval(10)
+        ), .cooldown)
+        XCTAssertEqual(rejected.recoveryGate(
+            coreMetadata: core,
+            observedSize: changedSize,
+            isVisibleActive: true,
+            isPaused: false,
+            now: start.addingTimeInterval(11)
+        ), .eligible)
+
+        var initial = FixedSizeRecoveryState.seeded(observedSize: nil, now: start)
+        XCTAssertEqual(initial.seededReason, .initialCapability)
+        XCTAssertNil(initial.source)
+        XCTAssertNil(initial.resizeResult)
+        XCTAssertNil(initial.originalFrame)
+        initial.recordObservedSizeIfNeeded(observedFailureFrame.size)
+        XCTAssertEqual(initial.baselineSize, observedFailureFrame.size)
+
+        let ignored = FixedSizeRecoveryState.seeded(
+            observedSize: observedFailureFrame.size,
+            reason: .ineffectiveResize,
+            source: "quick-app",
+            resizeResult: WindowFrameWriteResult.initialSizeWriteIgnored.diagnosticValue,
+            requestedFrame: requestedFrame,
+            observedFrameAtFailure: observedFailureFrame,
+            now: start
+        )
+        XCTAssertEqual(ignored.resizeResult, "initial-size-write-ignored")
+        XCTAssertNil(ignored.originalFrame)
+        XCTAssertEqual(ignored.requestedFrame, requestedFrame)
+        XCTAssertEqual(ignored.observedFrameAtFailure, observedFailureFrame)
+    }
+
     func testSuccessfulSizeWriteRequiresRepeatedUnchangedReadbackBeforeItIsIgnored() {
         let original = CGSize(width: 404, height: 88)
         let target = CGSize(width: 1_913, height: 1_523)

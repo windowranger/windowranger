@@ -4,6 +4,7 @@ set -euo pipefail
 
 zero_object="0000000000000000000000000000000000000000"
 commit_to_verify=""
+base_to_compare=""
 
 while read -r local_ref local_object remote_ref remote_object; do
     [[ "$local_object" != "$zero_object" ]] || continue
@@ -13,6 +14,13 @@ while read -r local_ref local_object remote_ref remote_object; do
         exit 1
     fi
     commit_to_verify="$local_object"
+    if [[ "$remote_object" != "$zero_object" && -z "$base_to_compare" ]]; then
+        base_to_compare="$remote_object"
+    elif [[ "$remote_object" != "$zero_object" && "$remote_object" != "$base_to_compare" ]]; then
+        print -u2 "WindowRanger pre-push validation cannot choose one comparison base for this multi-ref push."
+        print -u2 "Push the refs separately so each exact commit is validated against its remote base."
+        exit 1
+    fi
 done
 
 [[ -n "$commit_to_verify" ]] || exit 0
@@ -32,4 +40,12 @@ trap cleanup EXIT INT TERM
 
 print "Validating pushed commit ${commit_to_verify[1,12]} in an isolated worktree..."
 git -C "$repository_root" worktree add --detach "$validation_worktree" "$commit_to_verify"
-"$validation_worktree/scripts/verify-local-ci.sh" --quick
+if [[ -z "$base_to_compare" ]]; then
+    base_to_compare="$(git -C "$validation_worktree" rev-parse "${commit_to_verify}^" 2>/dev/null || true)"
+fi
+if [[ -n "$base_to_compare" ]]; then
+    "$validation_worktree/scripts/verify-local-ci.sh" --quick --base "$base_to_compare" --head "$commit_to_verify"
+else
+    print "No comparison base is available; running full quick verification."
+    "$validation_worktree/scripts/verify-local-ci.sh" --quick
+fi

@@ -204,6 +204,17 @@ class ReleaseRunnerTests(unittest.TestCase):
         self.assertEqual(process.waits, 1)
         self.assertTrue(process.closed)
 
+    def test_quiet_command_retains_full_log_and_verbose_is_opt_in(self):
+        fake = FakeRun(self.commit)
+        for verbose in (False, True):
+            output = io.StringIO()
+            log = self.root / "command.log"
+            with patch.object(release.subprocess, "Popen", FakePopen(fake)), patch("sys.stdout", output):
+                release.run_command(["fixture"], self.root, log, self.release_directory, verbose=verbose)
+            self.assertIn("ok\n", log.read_text())
+            self.assertEqual("ok\n" in output.getvalue(), verbose)
+            self.assertIn("Command succeeded", output.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -22,42 +22,95 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  test-and-build:
+  classify-verification:
     # Standard hosted runners are free once the repository is public. While it remains private,
     # local verification is the default and only an explicit manual dispatch may consume minutes.
     if: ${{ github.event_name == 'workflow_dispatch' || github.event.repository.private == false }}
-    name: Verify source and unsigned build
+    name: Classify verification scope
+    runs-on: ubuntu-latest
+    outputs:
+      scope: ${{ steps.scope.outputs.scope }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - id: scope
+        name: Classify changed paths
+        env:
+          BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          HEAD: ${{ github.sha }}
+        run: |
+          scope="$(python3 scripts/verification-scope.py scope --base "$BASE" --head "$HEAD")"
+          echo "scope=$scope" >> "$GITHUB_OUTPUT"
+
+  release-tooling:
+    needs: classify-verification
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.repository.private == false }}
+    name: Verify release and tooling workflows
     runs-on: macos-26
     timeout-minutes: 45
-    env:
-      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
-
     steps:
       - name: Check out source
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
-      - name: Install XcodeGen
-        run: |
-          brew install xcodegen
-          xcodegen --version
-          xcodebuild -version
-
-      - name: Generate Xcode project
-        run: xcodegen generate
-
       - name: Check release script syntax
-        run: zsh -n scripts/*.sh
+        run: zsh -n scripts/*.sh .githooks/*
 
       - name: Verify deterministic release workflows
         run: |
           ./scripts/verify-release-build-registry.sh
           ./scripts/verify-sparkle-feed-workflow.sh
           ./scripts/verify-homebrew-cask-workflow.sh
+          python3 scripts/test_local_verification.py
+          python3 scripts/test_verification_scope.py
+          python3 scripts/test_release.py
+          python3 scripts/test_release_channels.py
+          python3 scripts/test_stage_release_feed.py
+          python3 scripts/test_appcast.py
+
+  source-and-build:
+    needs: [classify-verification, release-tooling]
+    # Keep the protected PR check present for bookkeeping-only changes. The first
+    # step turns an upstream tooling failure into a failed required check.
+    if: ${{ always() && (github.event_name == 'workflow_dispatch' || github.event.repository.private == false) }}
+    name: ${{ github.event_name == 'pull_request' && 'Verify source and unsigned build' || 'Integration build and packaging' }}
+    runs-on: macos-26
+    timeout-minutes: 45
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+
+    steps:
+      - name: Confirm prerequisite verification succeeded
+        env:
+          CLASSIFICATION_RESULT: ${{ needs.classify-verification.result }}
+          TOOLING_RESULT: ${{ needs.release-tooling.result }}
+        run: |
+          test "$CLASSIFICATION_RESULT" = success
+          test "$TOOLING_RESULT" = success
+
+      - name: Check out source
+        if: ${{ needs.classify-verification.outputs.scope == 'full' }}
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Install XcodeGen
+        if: ${{ needs.classify-verification.outputs.scope == 'full' }}
+        run: |
+          brew install xcodegen
+          xcodegen --version
+          xcodebuild -version
+
+      - name: Generate Xcode project
+        if: ${{ needs.classify-verification.outputs.scope == 'full' }}
+        run: xcodegen generate
 
       - name: Verify non-hosted test isolation
+        if: ${{ needs.classify-verification.outputs.scope == 'full' }}
         run: ./scripts/verify-test-isolation.sh
 
       - name: Run tests
+        if: ${{ needs.classify-verification.outputs.scope == 'full' }}
         run: |
           xcodebuild \
             -project WindowRanger.xcodeproj \
@@ -68,18 +121,19 @@ jobs:
             test
 
       - name: Run static analysis
-        if: ${{ github.event_name != 'pull_request' }}
+        if: ${{ github.event_name != 'pull_request' && needs.classify-verification.outputs.scope == 'full' }}
         run: |
           xcodebuild \
             -project WindowRanger.xcodeproj \
             -scheme WindowRanger \
             -configuration Release \
             -destination 'generic/platform=macOS' \
+            -derivedDataPath .build/ci-derived-data \
             CODE_SIGNING_ALLOWED=NO \
             analyze
 
       - name: Build unsigned Release configuration
-        if: ${{ github.event_name != 'pull_request' }}
+        if: ${{ github.event_name != 'pull_request' && needs.classify-verification.outputs.scope == 'full' }}
         run: |
           xcodebuild \
             -project WindowRanger.xcodeproj \
@@ -91,7 +145,7 @@ jobs:
             build
 
       - name: Build unsigned DMG smoke packages
-        if: ${{ github.event_name != 'pull_request' }}
+        if: ${{ github.event_name != 'pull_request' && needs.classify-verification.outputs.scope == 'full' }}
         run: |
           ./scripts/install-dmg-tools.sh
           mkdir -p .build/ci-packages
@@ -107,7 +161,7 @@ jobs:
           ./scripts/verify-dmg.sh --dmg .build/ci-packages/WindowRanger-unsigned-beta.dmg
 
       - name: Upload unsigned DMG smoke packages
-        if: ${{ github.event_name != 'pull_request' }}
+        if: ${{ github.event_name != 'pull_request' && needs.classify-verification.outputs.scope == 'full' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: unsigned-dmg-smoke-${{ github.sha }}

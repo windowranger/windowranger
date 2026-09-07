@@ -160,16 +160,60 @@ struct WindowRefreshReport: Equatable, Sendable {
 /// A fixed-size classification is operational safety evidence. Reconsider it only after the exact
 /// surface has demonstrably changed size, then rate-limit failed capability reads without making a
 /// genuinely fixed-size window receive recurring Accessibility traffic.
+enum FixedSizeRecoverySeedReason: String, Equatable, Sendable {
+    case initialCapability = "initial-capability"
+    case ineffectiveResize = "ineffective-resize"
+}
+
+enum FixedSizeRecoveryGate: String, Equatable, Sendable {
+    case eligible
+    case admissionNoLongerFixedSize = "admission-no-longer-fixed-size"
+    case managementPaused = "management-paused"
+    case notVisibleActive = "not-visible-active"
+    case ineligibleWindowShape = "ineligible-window-shape"
+    case baselineUnavailable = "baseline-unavailable"
+    case observedSizeUnavailable = "observed-size-unavailable"
+    case sizeUnchanged = "size-unchanged"
+    case cooldown = "cooldown"
+}
+
 struct FixedSizeRecoveryState: Equatable, Sendable {
     static let capabilityRecheckCooldown: TimeInterval = 5
 
     private(set) var baselineSize: CGSize?
     var nextCapabilityRecheckDate: Date
+    let seededReason: FixedSizeRecoverySeedReason
+    let source: String?
+    let resizeResult: String?
+    let originalFrame: WindowFrame?
+    let requestedFrame: WindowFrame?
+    let observedFrameAtFailure: WindowFrame?
+    let seededAt: Date
+    private(set) var lastCapabilityProbeDate: Date?
+    private(set) var lastCapabilityProbeResult: String?
 
-    static func seeded(observedSize: CGSize?, now: Date) -> FixedSizeRecoveryState {
+    static func seeded(
+        observedSize: CGSize?,
+        reason: FixedSizeRecoverySeedReason = .initialCapability,
+        source: String? = nil,
+        resizeResult: String? = nil,
+        originalFrame: WindowFrame? = nil,
+        requestedFrame: WindowFrame? = nil,
+        observedFrameAtFailure: WindowFrame? = nil,
+        now: Date
+    ) -> FixedSizeRecoveryState {
         FixedSizeRecoveryState(
             baselineSize: observedSize.flatMap { isValidObservedSize($0) ? $0 : nil },
-            nextCapabilityRecheckDate: now.addingTimeInterval(capabilityRecheckCooldown)
+            nextCapabilityRecheckDate: now.addingTimeInterval(capabilityRecheckCooldown),
+            seededReason: reason,
+            source: source,
+            resizeResult: resizeResult,
+            originalFrame: originalFrame,
+            requestedFrame: requestedFrame,
+            observedFrameAtFailure: observedFrameAtFailure,
+            seededAt: now,
+            lastCapabilityProbeDate: nil,
+            lastCapabilityProbeResult: nil
         )
     }
 
@@ -177,24 +221,49 @@ struct FixedSizeRecoveryState: Equatable, Sendable {
         size.width.isFinite && size.height.isFinite && size.width > 0 && size.height > 0
     }
 
+    func recoveryGate(
+        allowsCapabilityRecheck: Bool = true,
+        coreMetadata: WindowAdmissionMetadata,
+        observedSize: CGSize?,
+        isVisibleActive: Bool,
+        isPaused: Bool,
+        now: Date
+    ) -> FixedSizeRecoveryGate {
+        guard allowsCapabilityRecheck else { return .admissionNoLongerFixedSize }
+        guard !isPaused else { return .managementPaused }
+        guard isVisibleActive else { return .notVisibleActive }
+        guard AccessibilityWindow.shouldCollectFixedSizeStandardWindowEvidence(coreMetadata) else {
+            return .ineligibleWindowShape
+        }
+        guard let baselineSize, Self.isValidObservedSize(baselineSize) else {
+            return .baselineUnavailable
+        }
+        guard let observedSize, Self.isValidObservedSize(observedSize) else {
+            return .observedSizeUnavailable
+        }
+        guard !AccessibilityWindow.sizesMatch(observedSize, baselineSize) else {
+            return .sizeUnchanged
+        }
+        guard now >= nextCapabilityRecheckDate else { return .cooldown }
+        return .eligible
+    }
+
     func shouldRecheck(
+        allowsCapabilityRecheck: Bool = true,
         coreMetadata: WindowAdmissionMetadata,
         observedSize: CGSize?,
         isVisibleActive: Bool,
         isPaused: Bool,
         now: Date
     ) -> Bool {
-        guard !isPaused,
-              isVisibleActive,
-              AccessibilityWindow.shouldCollectFixedSizeStandardWindowEvidence(coreMetadata),
-              let baselineSize,
-              let observedSize,
-              Self.isValidObservedSize(baselineSize),
-              Self.isValidObservedSize(observedSize),
-              !AccessibilityWindow.sizesMatch(observedSize, baselineSize),
-              now >= nextCapabilityRecheckDate
-        else { return false }
-        return true
+        recoveryGate(
+            allowsCapabilityRecheck: allowsCapabilityRecheck,
+            coreMetadata: coreMetadata,
+            observedSize: observedSize,
+            isVisibleActive: isVisibleActive,
+            isPaused: isPaused,
+            now: now
+        ) == .eligible
     }
 
     /// A resize failure can occur while the frame is unreadable. The first later readable size is
@@ -216,7 +285,12 @@ struct FixedSizeRecoveryState: Equatable, Sendable {
         now: Date
     ) -> Bool {
         nextCapabilityRecheckDate = now.addingTimeInterval(Self.capabilityRecheckCooldown)
-        return positionSettable == .trueValue && sizeSettable == .trueValue
+        lastCapabilityProbeDate = now
+        let recovered = positionSettable == .trueValue && sizeSettable == .trueValue
+        lastCapabilityProbeResult = recovered
+            ? "recovered"
+            : "position-\(positionSettable.rawValue),size-\(sizeSettable.rawValue)"
+        return recovered
     }
 }
 
@@ -966,6 +1040,29 @@ enum DropDownAppStartupPolicy {
                 wasHiddenByWindowRanger: $0.wasHiddenByWindowRanger
             )
         }
+    }
+}
+
+/// A later authoritative refresh may discover a Shelf application that had no windows during its
+/// initial scan. Claim it only when this refresh can own the visibility change and no direct Shelf
+/// transition is already deciding that application's state.
+enum QuickAppSessionReconciliationPolicy {
+    enum Disposition: Equatable {
+        case claim
+        case preserveExisting
+        case deferred
+    }
+
+    static func disposition(
+        hasExistingSession: Bool,
+        performsAXWrites: Bool,
+        hasInFlightShelfIntent: Bool,
+        hasIgnoredVisibilityRecovery: Bool
+    ) -> Disposition {
+        guard !hasExistingSession else { return .preserveExisting }
+        guard performsAXWrites, !hasInFlightShelfIntent, !hasIgnoredVisibilityRecovery
+        else { return .deferred }
+        return .claim
     }
 }
 
@@ -2297,6 +2394,9 @@ final class WorkspaceEngine {
     private var quickAppNeighborVisibilityGeneration: [String: UInt64] = [:]
     private var ignoredQuickAppVisibilityRecoveryGeneration: UInt64 = 0
     private var ignoredQuickAppVisibilityRecoveries: [String: IgnoredQuickAppVisibilityRecovery] = [:]
+    /// A visibility debt may complete synchronously during a refresh. Retain its bundle key until
+    /// the next refresh so discovery cannot immediately reclaim and re-hide that application.
+    private var ignoredQuickAppClaimSuppressionBundleKeys = Set<String>()
     private var pendingPausedQuickAppConfigurationUpdate: PendingQuickAppConfigurationUpdate?
     private var quickAppTopologyChangedWhilePaused = false
     private var commandPalettePresented = false
@@ -2549,7 +2649,8 @@ final class WorkspaceEngine {
 
     /// Suspends WindowRanger's input-independent management writes without changing layout intent.
     /// Resume first takes a read-only snapshot so tiled moves made during Pause are not learned as
-    /// new tree structure, then applies the current workspace rules exactly once.
+    /// new tree structure. It then performs one write-enabled refresh before applying current
+    /// workspace rules, so a Quick App that appeared during Pause is reclaimed before layout.
     func setWindowManagementPaused(_ paused: Bool) {
         queue.async { [weak self] in
             guard let self, self.isWindowManagementPaused != paused else { return }
@@ -2575,7 +2676,7 @@ final class WorkspaceEngine {
             }
 
             let correlationID = "pause-resume-\(UUID().uuidString.prefix(6))"
-            let report = self.refreshWindows(
+            _ = self.refreshWindows(
                 correlationID: correlationID,
                 performAXWrites: false,
                 observeFocus: true
@@ -2611,10 +2712,10 @@ final class WorkspaceEngine {
                 )
                 return
             }
-            self.applyVisibility(
-                displays: report.displays,
+            let report = self.refreshWindows(
                 correlationID: correlationID,
-                eligibleWindowKeys: report.writeEligibleWindowKeys
+                performAXWrites: true,
+                observeFocus: true
             )
             if self.isQuickAppShelfPresented {
                 self.reconcilePresentedQuickAppGroup(
@@ -3231,7 +3332,12 @@ final class WorkspaceEngine {
             return
         }
         if refreshBeforeResolving {
-            refreshWindows(correlationID: correlationID)
+            // The command below owns the next transition. Discovery must not briefly hide the
+            // same application between this refresh and the direct show/hide decision.
+            refreshWindows(
+                correlationID: correlationID,
+                allowQuickAppSessionReconciliation: false
+            )
         }
         if isQuickAppShelfPresented,
            quickAppApplicationSwitchHandoff == nil {
@@ -4765,6 +4871,44 @@ final class WorkspaceEngine {
             ("manual-tiled-move-preview-active", .value(String(manualTiledMovePreviewSession != nil))),
             ("manual-tiled-resize-preview-active", .value(String(manualTiledResizeSession != nil))),
         ]
+        if let recoveryState = fixedSizeRecoveryStateByWindow[key] {
+            let recoveryIsVisibleActive = tracked.map { tracked in
+                let rule = resolvedRule(for: tracked.bundleIdentifier)
+                return isWorkspaceActive(tracked.workspaceID) &&
+                    !isExcludedFromWorkspaceParticipation(tracked) &&
+                    !isDropDownAppWindow(tracked.key) &&
+                    !rule.keepsOnAllWorkspaces &&
+                    tracked.layoutOverride != .floating &&
+                    !rule.excludesFromLayout &&
+                    !(tracked.layoutOverride == .automatic &&
+                        rule.floatsSecondaryWindows &&
+                        cachedDecision?.isSecondaryWindowCandidate == true) &&
+                    actualFrame.map { Self.isMeaningfullyVisible($0, displays: displays) } == true
+            } ?? false
+            let recoveryGate = cachedMetadata.map { metadata in
+                DiagnosticReportValue.value(recoveryState.recoveryGate(
+                    allowsCapabilityRecheck: AccessibilityWindow.shouldRecheckFixedSizeCapabilities(
+                        for: AccessibilityWindow.admissionDecision(for: metadata)
+                    ),
+                    coreMetadata: metadata,
+                    observedSize: actualFrame?.size,
+                    isVisibleActive: recoveryIsVisibleActive,
+                    isPaused: isWindowManagementPaused,
+                    now: now
+                ).rawValue)
+            } ?? .unavailable("no cached admission metadata")
+            management.append(("fixed-size-recovery-seeded-reason", .value(recoveryState.seededReason.rawValue)))
+            management.append(("fixed-size-recovery-source", recoveryState.source.map(DiagnosticReportValue.value) ?? .unavailable("initial capability classification")))
+            management.append(("fixed-size-recovery-resize-result", recoveryState.resizeResult.map(DiagnosticReportValue.value) ?? .unavailable("initial capability classification")))
+            management.append(("fixed-size-recovery-original-frame", recoveryState.originalFrame.map { DiagnosticReportValue.value(Self.diagnosticFrame($0)) } ?? .unavailable("not observed before failed resize")))
+            management.append(("fixed-size-recovery-requested-frame", recoveryState.requestedFrame.map { DiagnosticReportValue.value(Self.diagnosticFrame($0)) } ?? .unavailable("no failed resize request")))
+            management.append(("fixed-size-recovery-observed-frame", recoveryState.observedFrameAtFailure.map { DiagnosticReportValue.value(Self.diagnosticFrame($0)) } ?? .unavailable("unavailable after failed resize")))
+            management.append(("fixed-size-recovery-seeded-at", .value(Self.diagnosticTimestamp(recoveryState.seededAt))))
+            management.append(("fixed-size-recovery-baseline-size", recoveryState.baselineSize.map { DiagnosticReportValue.value(Self.diagnosticSize($0)) } ?? .unavailable("no readable baseline")))
+            management.append(("fixed-size-recovery-last-probe-at", recoveryState.lastCapabilityProbeDate.map { DiagnosticReportValue.value(Self.diagnosticTimestamp($0)) } ?? .unavailable("no recovery probe")))
+            management.append(("fixed-size-recovery-last-probe-result", recoveryState.lastCapabilityProbeResult.map(DiagnosticReportValue.value) ?? .unavailable("no recovery probe")))
+            management.append(("fixed-size-recovery-gate", recoveryGate))
+        }
         if let tracked {
             let rule = resolvedRule(for: tracked.bundleIdentifier)
             let layout = workspaceLayout(for: tracked.workspaceID)
@@ -12536,10 +12680,12 @@ final class WorkspaceEngine {
         followExternalFocus: Bool = false,
         correlationID: String? = nil,
         performAXWrites: Bool = true,
-        observeFocus: Bool = true
+        observeFocus: Bool = true,
+        allowQuickAppSessionReconciliation: Bool = true
     ) -> WindowRefreshReport {
         let performAXWrites = performAXWrites && !isWindowManagementPaused
         lastBroadWindowRefreshDate = Date()
+        ignoredQuickAppClaimSuppressionBundleKeys = Set(ignoredQuickAppVisibilityRecoveries.keys)
         reconcileIgnoredQuickAppVisibilityRecoveries(correlationID: correlationID)
         let displays = Self.activeDisplays()
         let topologySignature = Self.displayTopologySignature(displays)
@@ -12731,10 +12877,10 @@ final class WorkspaceEngine {
                 if var recoveryState = fixedSizeRecoveryStateByWindow[key] {
                     recoveryState.recordObservedSizeIfNeeded(observedFrame?.size)
                     fixedSizeRecoveryStateByWindow[key] = recoveryState
-                    if AccessibilityWindow.shouldRecheckFixedSizeCapabilities(
-                        for: genericAdmissionDecision
-                    ),
-                       recoveryState.shouldRecheck(
+                    if recoveryState.shouldRecheck(
+                        allowsCapabilityRecheck: AccessibilityWindow.shouldRecheckFixedSizeCapabilities(
+                            for: genericAdmissionDecision
+                        ),
                         coreMetadata: coreAdmissionMetadata,
                         observedSize: observedFrame?.size,
                         isVisibleActive: windows[key].map {
@@ -12983,7 +13129,12 @@ final class WorkspaceEngine {
                     )
                     windows[key] = tracked
 
-                    if isPersistedHiddenQuickApp { continue }
+                    // Shelf ownership is decided after enumeration has established the complete
+                    // candidate group. Do not park or place a configured candidate before that
+                    // decision; unclaimed windows still reach the ordinary layout pass below.
+                    if isPersistedHiddenQuickApp || quickAppConfigurations.contains(where: {
+                        app.bundleIdentifier?.caseInsensitiveCompare($0.bundleIdentifier) == .orderedSame
+                    }) { continue }
 
                     let layoutDecision = Self.layoutDecision(
                         layoutOverride: tracked.layoutOverride,
@@ -13445,6 +13596,16 @@ final class WorkspaceEngine {
         temporarilyDeferredWindowKeys = deferredWindowKeys
         updateRetainedLayoutSlots(retainedLayoutSlotReasons, correlationID: correlationID)
 
+        // Reconcile after an authoritative enumeration but before any ordinary parking/layout
+        // writes, so a late-restoring Quick App cannot be moved as a workspace participant first.
+        reconcileUnownedDropDownAppSessions(
+            observedFrames: observedFrames,
+            displays: displays,
+            isStartup: isStartup,
+            performAXWrites: performAXWrites && allowQuickAppSessionReconciliation,
+            correlationID: correlationID
+        )
+
         // A workspace switch can coincide with an application's AX timeout. The switch must not
         // probe that process while it is in backoff, but once a later authoritative enumeration
         // succeeds we need to finish the skipped visibility write. Otherwise an inactive window
@@ -13479,15 +13640,6 @@ final class WorkspaceEngine {
                     correlationID: correlationID
                 )
             }
-        }
-
-        if isStartup {
-            prepareDropDownAppSessionForStartup(
-                observedFrames: observedFrames,
-                displays: displays,
-                performAXWrites: performAXWrites,
-                correlationID: correlationID
-            )
         }
 
         let focusedSnapshot = observeFocus ? focusedWindowSnapshot() : nil
@@ -16072,12 +16224,13 @@ final class WorkspaceEngine {
                 let frameResult = AccessibilityWindow.setFrameResult(frame, of: current.element)
                 succeeded = frameResult.succeeded
                 if frameResult.provesInitialResizeWasIneffective,
-                   let recovered = self.recoverIneffectiveResize(
-                    FrameChange(window: current, frame: frame),
-                    resizeResult: frameResult,
-                    correlationID: nil,
-                    source: "quick-app"
-                   ) {
+                    let recovered = self.recoverIneffectiveResize(
+                        FrameChange(window: current, frame: frame),
+                        resizeResult: frameResult,
+                        originalFrame: nil,
+                        correlationID: nil,
+                        source: "quick-app"
+                    ) {
                     succeeded = recovered
                 }
             }
@@ -16211,6 +16364,7 @@ final class WorkspaceEngine {
             ignoredQuickAppVisibilityRecoveryGeneration &+= 1
             let recoveryGeneration = ignoredQuickAppVisibilityRecoveryGeneration
             if shouldUnhide {
+                ignoredQuickAppClaimSuppressionBundleKeys.insert(bundleKey)
                 ignoredQuickAppVisibilityRecoveries[bundleKey] = IgnoredQuickAppVisibilityRecovery(
                     generation: recoveryGeneration,
                     processIdentifier: key.processIdentifier,
@@ -16548,26 +16702,47 @@ final class WorkspaceEngine {
         quickAppTransition = .idle
     }
 
-    private func prepareDropDownAppSessionForStartup(
+    private func reconcileUnownedDropDownAppSessions(
         observedFrames: [WindowKey: WindowFrame],
         displays: [DisplaySnapshot],
+        isStartup: Bool,
         performAXWrites: Bool,
         correlationID: String?
     ) {
+        guard !displays.isEmpty else { return }
         let persistedSessions = pendingRestoredDropDownAppSessions
-        defer { pendingRestoredDropDownAppSessions.removeAll() }
+        let hasInFlightShelfIntent = quickAppTransition != .idle ||
+            pendingQuickAppSelection != nil ||
+            pendingQuickAppHideAfterPresentation ||
+            quickAppApplicationSwitchHandoff != nil
+        var claimedSession = false
 
         // Every configured entry whose eligible windows belong to one process begins hidden and
-        // outside ordinary layout. Persisted ownership can recover an already hidden application;
-        // externally hidden applications and cross-process window sets remain untouched.
+        // outside ordinary layout. This runs after each authoritative enumeration so an app that
+        // was not ready during startup or wake is reclaimed before ordinary layout. Persisted
+        // ownership can recover an already hidden application; externally hidden applications and
+        // cross-process window sets remain untouched.
         for configuration in quickAppConfigurations {
             let bundleKey = Self.normalizedBundleIdentifier(configuration.bundleIdentifier)
             let persistedHiddenSession = persistedSessions[bundleKey]
-            guard quickAppSessions[bundleKey] == nil else {
+            switch QuickAppSessionReconciliationPolicy.disposition(
+                hasExistingSession: quickAppSessions[bundleKey] != nil,
+                performsAXWrites: performAXWrites,
+                hasInFlightShelfIntent: hasInFlightShelfIntent,
+                hasIgnoredVisibilityRecovery: ignoredQuickAppClaimSuppressionBundleKeys.contains(
+                    bundleKey
+                )
+            ) {
+            case .preserveExisting, .deferred:
                 continue
+            case .claim:
+                break
             }
             let candidates: [DropDownAppStartupCandidate] = windows.compactMap {
                 key, tracked -> DropDownAppStartupCandidate? in
+                guard tracked.bundleIdentifier?.caseInsensitiveCompare(configuration.bundleIdentifier) ==
+                    .orderedSame
+                else { return nil }
                 let applicationHidden = isDropDownApplicationHidden(
                     processIdentifier: tracked.processIdentifier,
                     bundleIdentifier: configuration.bundleIdentifier
@@ -16576,7 +16751,7 @@ final class WorkspaceEngine {
                     persistedHiddenSession,
                     windowKey: key,
                     bundleIdentifier: tracked.bundleIdentifier,
-                    isStartup: true,
+                    isStartup: isStartup || persistedHiddenSession != nil,
                     isApplicationHidden: applicationHidden
                 )
                 guard !applicationHidden || wasHiddenByWindowRanger else { return nil }
@@ -16604,11 +16779,12 @@ final class WorkspaceEngine {
                 if matchingCandidateCount > 0 {
                     diagnostics.log(
                         category: "drop-down-app",
-                        event: "startup-session-multiple-processes",
+                        event: "session-claim-multiple-processes",
                         correlation: correlationID,
                         fields: [
                             "bundle": configuration.bundleIdentifier,
                             "window-count": String(matchingCandidateCount),
+                            "claim-reason": isStartup ? "startup" : "discovery",
                         ]
                     )
                 }
@@ -16647,15 +16823,19 @@ final class WorkspaceEngine {
                 session.isApplicationHiddenByWindowRanger = hideRequestDispatched == true
             }
             quickAppSessions[bundleKey] = session
+            pendingRestoredDropDownAppSessions.removeValue(forKey: bundleKey)
+            claimedSession = true
 
             diagnostics.log(
                 category: "drop-down-app",
-                event: "startup-session-prepared",
+                event: "session-claim-prepared",
                 correlation: correlationID,
                 fields: [
                     "window": Self.diagnosticWindowKey(target.key),
                     "window-count": String(session.windowKeys.count),
+                    "candidate-count": String(matchingCandidateCount),
                     "bundle": configuration.bundleIdentifier,
+                    "claim-reason": isStartup ? "startup" : "discovery",
                     "presented": "false",
                     "pre-launch-visible": String(selection.wasMeaningfullyVisible),
                     "display": session.displayIdentifier ?? "none",
@@ -16669,6 +16849,9 @@ final class WorkspaceEngine {
                         .map(String.init) ?? "unavailable",
                 ]
             )
+        }
+        if claimedSession {
+            lastBackgroundLayoutSignature = nil
         }
     }
 
@@ -17694,6 +17877,7 @@ final class WorkspaceEngine {
                            let recovered = self.recoverIneffectiveResize(
                             change,
                             resizeResult: frameResult,
+                            originalFrame: current,
                             preserveVisiblePositionAfterIgnoredResize: true,
                             correlationID: correlationID,
                             source: "frame-application"
@@ -17729,6 +17913,7 @@ final class WorkspaceEngine {
     private func recoverIneffectiveResize(
         _ change: FrameChange,
         resizeResult: WindowFrameWriteResult,
+        originalFrame: WindowFrame?,
         preserveVisiblePositionAfterIgnoredResize: Bool = false,
         correlationID: String?,
         source: String
@@ -17752,10 +17937,17 @@ final class WorkspaceEngine {
         guard let decision = AccessibilityWindow.fixedSizeDecisionAfterIneffectiveResize(supportMetadata)
         else { return nil }
 
+        let now = Date()
         let observedFrame = AccessibilityWindow.frame(of: change.window.element)
         fixedSizeRecoveryStateByWindow[change.window.key] = .seeded(
             observedSize: observedFrame?.size,
-            now: Date()
+            reason: .ineffectiveResize,
+            source: source,
+            resizeResult: resizeResult.diagnosticValue,
+            originalFrame: originalFrame,
+            requestedFrame: change.frame,
+            observedFrameAtFailure: observedFrame,
+            now: now
         )
 
         recordAdmissionDecision(
@@ -17859,6 +18051,7 @@ final class WorkspaceEngine {
                                 _ = self.recoverIneffectiveResize(
                                     FrameChange(window: current, frame: change.frame),
                                     resizeResult: result,
+                                    originalFrame: nil,
                                     correlationID: nil,
                                     source: "quit-recovery"
                                 )
@@ -19894,7 +20087,17 @@ final class WorkspaceEngine {
     }
 
     private static func diagnosticFrame(_ frame: WindowFrame) -> String {
-        "\(diagnosticPoint(frame.position));\(String(format: "%.1fx%.1f", frame.size.width, frame.size.height))"
+        "\(diagnosticPoint(frame.position));\(diagnosticSize(frame.size))"
+    }
+
+    private static func diagnosticSize(_ size: CGSize) -> String {
+        String(format: "%.1fx%.1f", size.width, size.height)
+    }
+
+    private static func diagnosticTimestamp(_ date: Date) -> String {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter.string(from: date)
     }
 
     private static func diagnosticRect(_ rect: CGRect) -> String {

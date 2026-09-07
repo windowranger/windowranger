@@ -29,6 +29,9 @@ scripts, reports progress, and retains command output and a provenance-bound jou
 same version, build number and exact source commit throughout a release. Read the printed plan
 before execution. A failed stage stops the run; inspect its log before resuming. Existing partial
 distribution output is never silently overwritten or treated as a successful build.
+Command output goes to the printed log path by default, with elapsed-time heartbeats every
+30 seconds. Use `--verbose` when diagnosing a failure; normal monitoring does not require
+streaming compiler, upload or signature-verification logs into the conversation.
 
 For example, after allocating the version/build and promoting the accepted source to clean
 `main`, preview the build and asset verification together (replace every placeholder):
@@ -50,9 +53,60 @@ Add `--execute` to perform that plan. Later stages use the same version/build/co
 This reduces command assembly and repetitive verification. It does not shorten Xcode compilation,
 Apple notarization or remote uploads, and does not bypass their checks. Build-number allocation,
 reviewed branch promotion, exact packaged-app acceptance, tag publication, GitHub publication,
-website/tap promotion and final release records remain explicit coordination steps. The runner
+and final release records remain explicit coordination steps. Website/tap promotion can use the
+post-public coordinator below once those channel changes are authorized. The stage runner
 does not change the installed app or silently publish a release. A saved successful verification
 is historical evidence; rerun remote verification after publication to check the current channel.
+
+### Post-public Stable channels
+
+After the exact GitHub release is public and immutable, `scripts/release-channels.py` coordinates
+the published ledger, website/feed PR and deployment, live verification, and Homebrew PR/audit.
+It uses dedicated worktrees and records its progress under `.build/release-channel-runs/`.
+It does not allocate a build, promote application source, publish GitHub, or install the app.
+
+Create a local JSON configuration with the selected release's real paths and full commit:
+
+```json
+{
+  "version": "X.Y.Z",
+  "build_number": "NUMBER",
+  "release_commit": "FULL_RELEASE_COMMIT",
+  "source_repository": "/path/to/clean/release-source",
+  "website_repository": "/path/to/website-repository",
+  "tap_repository": "/path/to/homebrew-tap",
+  "release_root": "/path/to/release-artifacts",
+  "sparkle_bin": "/path/to/Sparkle/bin",
+  "key_plist": "/path/to/release-app/Contents/Info.plist",
+  "named_tap_checkout": "/opt/homebrew/Library/Taps/appranger/homebrew-tap"
+}
+```
+
+Preview with `python3 scripts/release-channels.py --config /path/to/channels.json`.
+After reviewing the configuration and authorizing these release checkpoints, add `--execute`.
+An interrupted run uses the same file with `--execute --resume`; inspect the journal and error
+before resuming. Ambiguous public mutations must be reconciled before retrying.
+Release notes default to the release commit's `docs/releases/vX.Y.Z.md`. A custom `release_notes`
+path requires an explicitly reviewed `release_notes_sha256` in the configuration. Tools default
+to the release commit too; an explicit `tooling_commit` binds a separately reviewed tooling revision.
+
+### Verification reuse
+
+The required PR check retains the name `Verify source and unsigned build`. Push builds use
+`Integration build and packaging` so their longer packaging run does not share the PR context.
+Release analysis and the unsigned build share DerivedData. Application changes still run the
+full non-hosted suite, with analysis/build/DMG gates on integration pushes.
+
+Only additions/modifications to `TODO.md`, `docs/releases/*.md`, and `config/release-builds.tsv`
+qualify as release bookkeeping. Those CI changes run the release/tooling checks without another
+application compilation. Missing comparison bases, deletions, renames and other paths require
+application verification. Local quick checks additionally require a successful receipt matching
+the entire non-bookkeeping Git tree (including file modes) and Xcode/XcodeGen versions before
+reusing application tests. Dirty checkouts cannot create or reuse this proof. `--full` and the
+credentialed distribution checks retain their complete gates.
+
+The next timed release must measure these changes against 1.0.8's 43m01s end-to-end baseline;
+local tests establish behavior, not a demonstrated time or token saving.
 
 For feed preparation, create a fresh directory from the selected website checkout:
 
@@ -83,6 +137,9 @@ Verify this tooling independently of the macOS app tests:
 python3 -m unittest discover -s scripts -p 'test_release.py'
 python3 -m unittest discover -s scripts -p 'test_appcast.py'
 python3 -m unittest discover -s scripts -p 'test_stage_release_feed.py'
+python3 -m unittest discover -s scripts -p 'test_verification_scope.py'
+python3 -m unittest discover -s scripts -p 'test_release_channels.py'
+python3 -m unittest discover -s scripts -p 'test_local_verification.py'
 ```
 
 These checks cover orchestration and verification failure paths, not signing, notarization,
