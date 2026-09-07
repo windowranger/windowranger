@@ -173,19 +173,41 @@ class ChannelTests(unittest.TestCase):
         self.assertLess(order.index("local-appcast-validation"), order.index("commit-push"))
         self.assertLess(order.index("commit-push"), order.index("deploy"))
 
-    def test_tap_stale_bytes_fail_before_style_or_audit(self):
+    def test_website_gate_failure_prevents_merge(self):
+        worktrees = self.root / "worktrees"; website = worktrees / "website"
+        website.mkdir(parents=True); (website / ".git").write_text("gitdir: fixture")
+        journal = {"steps": {"website": {"status": "pending", "pr": "9", "head": self.sha}}}
+        def checked(command, *_args, **_kwargs):
+            if command[:3] == ["bun", "run", "lint:html"]:
+                raise channels.ChannelError("lint failed")
+            return ""
+        with patch.object(channels, "checked", side_effect=checked), patch.object(channels, "clean"), \
+             patch.object(channels, "revision", return_value=self.sha), patch.object(channels, "wait_for_merge") as merge:
+            with self.assertRaisesRegex(channels.ChannelError, "lint failed"):
+                channels.website_publish(self.config, self.root / "journal.json", journal, worktrees, 0)
+        merge.assert_not_called()
+
+    def test_tap_candidate_audit_failure_prevents_pr_or_merge_and_restores_cask(self):
         worktrees = self.root / "worktrees"; tooling = worktrees / "release-tooling"
         generated = tooling / ".build" / "release-runs" / "1.0.9-22-aaaaaaaaaaaa" / "WindowRanger.rb"
         generated.parent.mkdir(parents=True); generated.write_text('version "1.0.9"\n')
         named = self.root / "named-tap"; (named / ".git").mkdir(parents=True); (named / "Casks").mkdir(); (named / "Casks" / "windowranger.rb").write_text('version "1.0.8"\n')
         config = dict(self.config, named_tap_checkout=str(named))
-        journal = {"steps": {"tap": {"status": "pending", "pr": "9", "head": self.sha}}}
+        original = (named / "Casks" / "windowranger.rb").read_bytes()
+        journal = {"steps": {}}
         def checked(command, *_args, **_kwargs):
             return str(named) if command[:3] == ["brew", "--repository", "appranger/tap"] else ""
-        with patch.object(channels, "checked", side_effect=checked) as commands, patch.object(channels, "wait_for_merge", return_value="b" * 40), \
-             patch.object(channels, "clean"), patch.object(channels, "git", return_value="git@github.com:AppRanger/homebrew-tap.git"), patch.object(channels, "revision", return_value="b" * 40):
+        def failing_audit(command, *args, **kwargs):
+            if command[:2] == ["brew", "audit"]:
+                self.assertEqual(kwargs["environment"]["HOMEBREW_NO_AUTO_UPDATE"], "1")
+                raise channels.ChannelError("audit failed")
+            return checked(command, *args, **kwargs)
+        with patch.object(channels, "checked", side_effect=failing_audit), patch.object(channels, "commit_and_push") as commit, \
+             patch.object(channels, "create_pr") as create, patch.object(channels, "wait_for_merge") as merge, \
+             patch.object(channels, "clean"), patch.object(channels, "git", return_value="git@github.com:AppRanger/homebrew-tap.git"):
             with self.assertRaises(channels.ChannelError): channels.tap_publish(config, self.root / "journal.json", journal, worktrees, 0)
-        self.assertFalse(any(call.args[0][:2] == ["brew", "style"] or call.args[0][:2] == ["brew", "audit"] for call in commands.call_args_list))
+        self.assertEqual((named / "Casks" / "windowranger.rb").read_bytes(), original)
+        commit.assert_not_called(); create.assert_not_called(); merge.assert_not_called()
 
     def test_tap_exact_updated_bytes_are_styled_and_audited(self):
         worktrees = self.root / "worktrees"; tooling = worktrees / "release-tooling"
@@ -195,11 +217,18 @@ class ChannelTests(unittest.TestCase):
         config = dict(self.config, named_tap_checkout=str(named))
         journal = {"steps": {"tap": {"status": "pending", "pr": "9", "head": self.sha}}}
         def checked(command, *_args, **_kwargs): return str(named) if command[:3] == ["brew", "--repository", "appranger/tap"] else ""
-        with patch.object(channels, "checked", side_effect=checked) as commands, patch.object(channels, "wait_for_merge", return_value="b" * 40), \
+        def merged(*_args, **_kwargs):
+            self.assertTrue(any(call.args[0][:2] == ["brew", "audit"] for call in commands.call_args_list))
+            return "b" * 40
+        with patch.object(channels, "checked", side_effect=checked) as commands, patch.object(channels, "wait_for_merge", side_effect=merged), \
              patch.object(channels, "clean"), patch.object(channels, "git", return_value="git@github.com:AppRanger/homebrew-tap.git"), patch.object(channels, "revision", return_value="b" * 40):
             channels.tap_publish(config, self.root / "journal.json", journal, worktrees, 0)
         actions = [call.args[0][:2] for call in commands.call_args_list]
         self.assertIn(["brew", "style"], actions); self.assertIn(["brew", "audit"], actions)
+
+    def test_tap_requires_named_checkout_for_candidate_validation(self):
+        with self.assertRaisesRegex(channels.ChannelError, "named_tap_checkout is required"):
+            channels.named_tap_checkout(self.config, self.root / "tap")
 
     def test_release_input_verifiers_use_bound_tooling_checkout(self):
         tooling = self.root / "tooling"; tooling.mkdir()

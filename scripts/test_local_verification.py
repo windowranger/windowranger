@@ -19,7 +19,11 @@ class LocalVerificationTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.repository = Path(self.temporary.name) / "repository"
         self.repository.mkdir()
-        shutil.copytree(ROOT / "scripts", self.repository / "scripts")
+        shutil.copytree(ROOT / "scripts", self.repository / "scripts",
+                        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+        # Python creates bytecode on a clean runner. It must not turn the clean
+        # receipt fixture dirty or depend on the developer's global Git ignores.
+        (self.repository / ".gitignore").write_text("__pycache__/\n*.pyc\n.build/\n", encoding="utf-8")
         shutil.copytree(ROOT / "config", self.repository / "config")
         (self.repository / ".githooks").mkdir()
         shutil.copy2(ROOT / ".githooks" / "pre-push", self.repository / ".githooks" / "pre-push")

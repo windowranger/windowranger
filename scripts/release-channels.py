@@ -353,6 +353,45 @@ def commit_and_push(worktree: Path, message: str, remote: str = "origin") -> str
     return head
 
 
+def validate_website_worktree(worktree: Path, expected_head: str | None = None) -> None:
+    """Run the website's local gate before its content can be published or merged."""
+    if expected_head is not None:
+        clean(worktree)
+        if revision(worktree, "HEAD") != expected_head:
+            raise ChannelError("Website worktree no longer matches the pull-request head")
+    checked(["bun", "install", "--frozen-lockfile"], worktree)
+    checked(["bun", "run", "lint:html"], worktree)
+    checked(["bun", "run", "check"], worktree)
+
+
+def named_tap_checkout(config: dict[str, Any], tap: Path) -> Path:
+    named = config.get("named_tap_checkout")
+    if not isinstance(named, str) or not named.strip():
+        raise ChannelError("named_tap_checkout is required for Homebrew validation")
+    named_path = Path(named).expanduser().resolve()
+    clean(named_path)
+    if git(named_path, "remote", "get-url", "origin") != git(tap, "remote", "get-url", "origin"):
+        raise ChannelError("named_tap_checkout remote differs from tap_repository")
+    if Path(checked(["brew", "--repository", "appranger/tap"], named_path)).resolve() != named_path:
+        raise ChannelError("named_tap_checkout is not the configured appranger/tap checkout")
+    return named_path
+
+
+def audit_cask_candidate(named_path: Path, generated: Path) -> None:
+    """Audit generated cask bytes through Homebrew's configured named tap, restoring them always."""
+    destination = named_path / "Casks" / "windowranger.rb"
+    if not destination.is_file():
+        raise ChannelError("named_tap_checkout is missing Casks/windowranger.rb")
+    original = destination.read_bytes()
+    try:
+        destination.write_bytes(generated.read_bytes())
+        environment = dict(os.environ, HOMEBREW_NO_AUTO_UPDATE="1")
+        checked(["brew", "style", "--cask", "appranger/tap/windowranger"], named_path, environment=environment)
+        checked(["brew", "audit", "--strict", "--online", "--cask", "appranger/tap/windowranger"], named_path, environment=environment)
+    finally:
+        destination.write_bytes(original)
+
+
 def record_step(journal_file: Path, journal: dict[str, Any], name: str, **fields: Any) -> None:
     journal["steps"][name] = {"status": "succeeded", "at": now(), **fields}
     write_json(journal_file, journal)
@@ -403,6 +442,7 @@ def website_publish(config: dict[str, Any], journal_file: Path, journal: dict[st
     worktree = worktrees / name
     scratch = worktrees / "feed-staging"
     prior = journal["steps"].get(name, {})
+    locally_validated = False
     if "pr" not in prior:
         add_worktree(website, worktree, "origin/main", branch)
         recovered_state = recover_pending_pr(worktree, website, branch, "main", f"Publish WindowRanger {config['version']} feed", "Generated appcast and immutable release payloads.")
@@ -412,6 +452,8 @@ def website_publish(config: dict[str, Any], journal_file: Path, journal: dict[st
             write_json(journal_file, journal)
         else:
             stage_website_payload(config, worktree, scratch)
+            validate_website_worktree(worktree)
+            locally_validated = True
             git(worktree, "add", "public/index.html", "public/assets", "public/appcast.xml", "public/updates")
             if run(["git", "diff", "--cached", "--quiet"], worktree).returncode != 1:
                 raise ChannelError("Website staging produced no changes")
@@ -420,11 +462,13 @@ def website_publish(config: dict[str, Any], journal_file: Path, journal: dict[st
             journal["steps"][name] = {"status": "pending", "pr": number, "head": head}
             write_json(journal_file, journal)
     prior = journal["steps"][name]
-    merge = wait_for_merge(website, prior["pr"], prior["head"], poll_seconds=poll_seconds)
-    deploy = worktrees / "website-deploy"
     deployment = journal["steps"].get("website_deploy", {})
     if deployment.get("status") == "started":
         raise ChannelError("Website deployment was interrupted after it started; reconcile production before marking the journal and resuming")
+    if not locally_validated:
+        validate_website_worktree(worktree, prior["head"])
+    merge = wait_for_merge(website, prior["pr"], prior["head"], poll_seconds=poll_seconds, require_checks=False)
+    deploy = worktrees / "website-deploy"
     if deployment.get("status") != "succeeded":
         add_worktree(website, deploy, merge)
         if revision(deploy, "HEAD") != merge:
@@ -486,6 +530,8 @@ def tap_publish(config: dict[str, Any], journal_file: Path, journal: dict[str, A
     checked(release_command, tooling)
     generated = tooling / ".build" / "release-runs" / f"{config['version']}-{config['build_number']}-{config['release_commit'][:12]}" / "WindowRanger.rb"
     if not generated.is_file(): raise ChannelError("release.py did not create the expected cask artifact")
+    named_path = named_tap_checkout(config, tap)
+    audit_cask_candidate(named_path, generated)
     branch, worktree = f"codex/release-{config['version']}-cask", worktrees / name
     prior = journal["steps"].get(name, {})
     if "pr" not in prior:
@@ -503,23 +549,14 @@ def tap_publish(config: dict[str, Any], journal_file: Path, journal: dict[str, A
             journal["steps"][name] = {"status": "pending", "pr": number, "head": head}; write_json(journal_file, journal)
     prior = journal["steps"][name]
     merge = wait_for_merge(tap, prior["pr"], prior["head"], poll_seconds=poll_seconds, require_checks=False)
-    named = config.get("named_tap_checkout")
-    if named:
-        named_path = Path(named).expanduser().resolve()
-        clean(named_path)
-        if git(named_path, "remote", "get-url", "origin") != git(tap, "remote", "get-url", "origin"):
-            raise ChannelError("named_tap_checkout remote differs from tap_repository")
-        git(named_path, "fetch", "origin", "--prune")
-        git(named_path, "checkout", "main")
-        git(named_path, "merge", "--ff-only", "origin/main")
-        if revision(named_path, "HEAD") != revision(named_path, "origin/main"):
-            raise ChannelError("named_tap_checkout did not fast-forward to origin/main")
-        if Path(checked(["brew", "--repository", "appranger/tap"], named_path)).resolve() != named_path:
-            raise ChannelError("named_tap_checkout is not the configured appranger/tap checkout")
-        if (named_path / "Casks" / "windowranger.rb").read_bytes() != generated.read_bytes():
-            raise ChannelError("named_tap_checkout cask differs from the generated immutable cask")
-        checked(["brew", "style", "--cask", "appranger/tap/windowranger"], named_path)
-        checked(["brew", "audit", "--strict", "--online", "--cask", "appranger/tap/windowranger"], named_path)
+    git(named_path, "fetch", "origin", "--prune")
+    git(named_path, "checkout", "main")
+    git(named_path, "merge", "--ff-only", "origin/main")
+    if revision(named_path, "HEAD") != revision(named_path, "origin/main"):
+        raise ChannelError("named_tap_checkout did not fast-forward to origin/main")
+    if (named_path / "Casks" / "windowranger.rb").read_bytes() != generated.read_bytes():
+        raise ChannelError("named_tap_checkout cask differs from the generated immutable cask")
+    audit_cask_candidate(named_path, generated)
     record_step(journal_file, journal, name, pr=prior["pr"], head=prior["head"], merge_commit=merge)
 
 
