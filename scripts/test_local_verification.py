@@ -21,7 +21,6 @@ class LocalVerificationTests(unittest.TestCase):
         self.repository.mkdir()
         shutil.copytree(ROOT / "scripts", self.repository / "scripts")
         shutil.copytree(ROOT / "config", self.repository / "config")
-        shutil.copytree(ROOT / "WindowRanger.xcodeproj", self.repository / "WindowRanger.xcodeproj")
         (self.repository / ".githooks").mkdir()
         shutil.copy2(ROOT / ".githooks" / "pre-push", self.repository / ".githooks" / "pre-push")
         self.fake_bin = Path(self.temporary.name) / "bin"
@@ -54,6 +53,11 @@ class LocalVerificationTests(unittest.TestCase):
         self.git("commit", "-qm", message)
 
     def write_fake_tools(self) -> None:
+        # These tests exercise receipt reuse, not Xcode project generation or isolation.
+        # Keep that boundary synthetic so a clean checkout needs no generated project
+        # and never invokes the host's absolute /usr/bin/xcodebuild through the real gate.
+        isolation = self.repository / "scripts" / "verify-test-isolation.sh"
+        isolation.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
         xcodebuild = self.fake_bin / "xcodebuild"
         xcodebuild.write_text(
             "#!/bin/sh\n"
