@@ -15,7 +15,7 @@ enum DiagnosticReportValue: Equatable, Sendable {
 }
 
 struct FocusedWindowDiagnosticSnapshot: Equatable, Sendable {
-    static let schemaVersion = 2
+    static let schemaVersion = 3
     static let maximumReportBytes = 64_000
 
     let timestamp: Date

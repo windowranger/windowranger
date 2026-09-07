@@ -311,16 +311,16 @@ smallest useful outcome and acceptance boundary.
 
 ## Inbox
 
-### WR-129 — Assess redundant release verification work
+### WR-130 — Publish and time Stable 1.0.9
 
-- **Status:** Research follow-up from timed release; no gate changes authorized or implemented.
-- **Evidence:** 1.0.8 took 37m07s to all-channel verification; source promotion alone took 17m07s.
-  Integration CI spent 4m40s in analysis and 4m03s on the unsigned build. Pre-push checks, PR tests,
-  integration checks and the credentialed pipeline repeat portions of verification.
-- **Acceptance:** Propose evidence-based reuse or scheduling changes that retain exact-source
-  coverage, required protection and artifact checks; measure a later release before claiming
-  faster total time. The WR-127 runner currently reduces command handling, not these waits.
-
+- **Status:** In progress; explicitly authorized on 7 September 2026 after the maintainer reported
+  a full day of use without issues in the installed Dev build.
+- **Scope:** WR-077 ongoing Quick App ownership reconciliation, WR-123 retained resize diagnostics,
+  and WR-129 release verification/channel automation. Build 22 reserved for Stable 1.0.9.
+- **Acceptance:** Exact packaged-app verification, immutable GitHub artifacts, signed live feed,
+  website and Homebrew channel verification, with elapsed time compared against 1.0.8's 43m01s.
+- **Live-use evidence:** Maintainer reports a full day without issues. This does not establish a
+  controlled delayed-wake reproduction or resolve the separate fixed-size tiling diagnosis.
 
 ### WR-125 — Investigate CLI peer-rejection process exit
 
@@ -2211,12 +2211,31 @@ smallest useful outcome and acceptance boundary.
   immediately on release. The user accepted the installed alignment at the current configured
   density on 24 August 2026.
 
-### WR-077 — Hide every unambiguous Quick App Shelf entry at startup
+### WR-077 — Reclaim unowned Quick App Shelf entries during discovery
 
-- **Type:** Quick App Shelf startup bug
+- **New diagnostic-backed recurrence (6 September 2026):** In installed diagnostic Dev session
+  `38F6F345-0932-45A4-B902-CEB04E21D51A`, startup at 18:33:46Z on 5 September reported zero displays
+  and completed startup refresh. At 20:38:42Z, screen wake reconciliation completed with zero managed
+  windows; at 20:38:43.757Z Ghostty `1339:140` was classified normal and at 20:38:44.286Z explicitly
+  resized into a workspace-2 tile. There are no Quick App preparation/session events in the retained
+  session. Morning wake at 07:56:16Z on 6 September retained that existing ordinary layout.
+  The active profile contains Ghostty as a Quick App. Snapshots and a focused timeline are retained
+  under `.build/Logs/quick-app-resume-20260906/` in the isolated debug checkout.
+- **Source-backed cause:** The initial refresh is marked complete unconditionally; Quick App startup
+  preparation runs only for `isStartup`. A sleeping/unready/empty initial enumeration can therefore
+  miss ownership, and later discovery uses ordinary admission. This is a different route from
+  WR-121's loss of already-established ownership. The retained installed-session timeline demonstrates
+  late discovery after empty startup; an end-to-end reproduction of the corrected path remains required.
+- **Scope extended (6 September 2026):** Reconcile eligible configured applications with missing Shelf
+  ownership on every write-enabled discovery, including late startup, wake, and pause resume, before
+  ordinary parking/layout. Preserve existing presented sessions and in-flight user intent. Retain exact
+  pending hidden ownership across empty scans. Installed startup evidence is recorded below; delayed
+  discovery and wake acceptance remain unverified.
+
+- **Type:** Quick App Shelf discovery/lifecycle bug
 - **Priority:** P1
-- **Status:** Live validation — implemented, automated-test verified, and signed restart evidence
-  recorded; end-to-end Shelf presentation acceptance pending.
+- **Status:** Live validation — ongoing reconciliation implemented and all 934 non-hosted tests pass.
+  Historical signed restart evidence below covers the earlier startup-only change.
 - **Requested:** 24 August 2026.
 - **User-observed (2026-08-24):** On some WindowRanger starts, Quick Shelf applications remained
   visible instead of being hidden away.
@@ -2226,12 +2245,19 @@ smallest useful outcome and acceptance boundary.
   after another application received focus. The startup policy was therefore deliberately retaining
   pre-launch visibility rather than encountering a failed Hide request. It also prepared only the
   selected Shelf entry, leaving other configured entries dependent on persisted ownership.
-- **Expected:** Starting WindowRanger hides every configured Shelf application for which exactly one
-  safe eligible window can be identified. Pre-launch visibility must not implicitly present a Shelf
+- **Expected:** Authoritative write-enabled discovery claims every unowned configured Shelf application
+  whose safe eligible windows belong to one process. Pre-launch visibility must not implicitly present a Shelf
   entry or let a nonselected entry join ordinary workspace layout. Externally hidden applications
-  and ambiguous multiple-window sets remain untouched; exact persisted WindowRanger hide ownership
+  and ambiguous multiple-process sets remain untouched; exact persisted WindowRanger hide ownership
   remains recoverable.
-- **Implemented:** Startup no longer derives presented state from a Shelf window's pre-launch
+- **Implemented (6 September 2026):** Missing sessions are reconciled after enumeration and before
+  ordinary recovery parking/layout. Newly admitted configured candidates skip eager frame/parking
+  writes until that ownership decision. Pause resume performs a fresh write-enabled refresh before layout;
+  existing sessions, direct toggles, in-flight Shelf intent, read-only passes, and unavailable displays
+  retain their safeguards. Pending ignored-session visibility recovery suppresses automatic claims
+  through the current scan, including synchronous confirmation. Claim diagnostics record
+  startup/discovery reason and candidate counts.
+- **Earlier startup implementation:** Startup no longer derives presented state from a Shelf window's pre-launch
   visibility. It independently claims every configured Shelf entry with one safe eligible window,
   begins each session hidden, and requests application Hide before ordinary workspace layout. The
   existing exact persisted-ownership recovery, external-hide separation, deferred/full-screen
@@ -2244,6 +2270,11 @@ smallest useful outcome and acceptance boundary.
   applications confirms both begin hidden and remain available through normal Shelf selection.
 - **Automated evidence:** On 24 August 2026, all 51 focused DropDown App and Quick App Shelf tests
   passed, followed by test isolation, repository checks, and the complete 702-test non-hosted suite.
+- **Current automated evidence (6 September 2026):** 286 focused tests passed across DropDown App,
+  Quick App Shelf, wake reconciliation, workspace definition, and focused diagnostics. Test isolation
+  and the full 934-test non-hosted suite passed, with log at
+  `.build/Logs/quick-app-resume-20260906/full-tests.log`. New coverage exercises reconciliation policy
+  and candidate ambiguity; it does not drive the real AX discovery/resume sequence.
 - **Installed evidence:** With explicit approval, signed universal Debug build
   `9f154f7a6a79-dirty` (CDHash `40b44bb4da1409e4cd4548b78b659bc6fc494271`) was installed and
   launched from `/Applications/WindowRanger.app`. Its Apple Development signature, Team ID
@@ -2251,8 +2282,17 @@ smallest useful outcome and acceptance boundary.
   path were verified. Fresh startup session `79368B60-467E-4506-831F-9430A0629DB4` observed both
   Notes and Ghostty as visible before launch, then prepared each independently with `presented=false`
   and an accepted Hide request before ordinary layout.
-- **Live validation remaining:** Confirm both entries are visually hidden after this restart and can
-  still be presented normally from the Shelf.
+- **Current installed evidence (6 September 2026):** With explicit approval, installed signed Dev
+  `7ba533fe033f-dirty` at `/Applications/WindowRanger Dev.app`; debug dylib SHA-256
+  `c76316d884d78247437a05877c070b8939f7c798b0376550bd05089391198bbc`.
+  Only Dev is running, Accessibility is granted, and management is unpaused. Session
+  `D7997C5A-7FE5-4C30-8E49-07EC1B6EED91` claimed Ghostty `1339:140` at startup with an accepted
+  Hide request; a subsequent read-only AppKit check confirmed PID 1339 `isHidden=true`.
+  Install log and captured `installed-session.jsonl` are retained under the recurrence evidence directory.
+  The Stable executable hash is unchanged. This confirms installed startup claiming, not delayed wake recovery.
+- **Live validation remaining:** Verify initially unavailable
+  Ghostty is reclaimed before ordinary layout when its windows return, including wake and pause resume.
+  Confirm existing presented sessions remain visible and both configured entries still present normally.
 
 ### WR-075 — Exclude externally hidden applications from active layout geometry
 
@@ -3807,6 +3847,25 @@ smallest useful outcome and acceptance boundary.
 
 ## Live validation
 
+### WR-129 — Reduce repetitive release verification and coordination
+
+- **Status:** Implemented and locally verified; uncommitted preparation, awaiting hosted integration
+  and the next authorized release measurement. No new release was published during this work.
+- **Baseline:** 1.0.8 took 37m07s to all-channel verification and 43m01s including records.
+  Source promotion took 17m07s; integration analysis/build took 4m40s/4m03s.
+- **Implemented:** Distinct PR/push check contexts, shared Release DerivedData, conservative
+  bookkeeping classification, clean exact-tree/toolchain receipts, quiet durable command logs,
+  and a post-public ledger/website/Homebrew coordinator with provenance and recovery checks.
+  Credentialed distribution checks remain complete.
+- **Verification:** 60 deterministic tooling tests passed, including real temporary-repository
+  receipt tests and channel failure/recovery tests. The local quick checkpoint passed all 932
+  non-hosted app tests plus isolation and existing release workflow checks. Shell syntax, YAML
+  parsing, review and a no-publication 1.0.8 configuration preview passed.
+- **Remaining boundary:** Merge before hosted CI can exercise the changed workflow. Full unsigned
+  analysis/build/DMG validation belongs to that integration checkpoint; no distributable build,
+  signing, deployment or live-app changes were performed. The next authorized release must
+  measure time/token impact before any savings claim. Instructions are in the release runbook.
+
 ### WR-126 — Preserve the focused diagnostic report through menu closure
 
 - **Type:** User-observed support-command failure; source-backed lifetime bug
@@ -3821,8 +3880,35 @@ smallest useful outcome and acceptance boundary.
 ### WR-123 — Recover tiling when a formerly fixed-size window becomes resizable
 
 - **Type:** User-observed tiling bug; source-backed recovery gap
-- **Status:** Live validation — the rounding correction is released in Stable 1.0.8 and its
-  boundary passes signed installed checks. Continued real-use recurrence monitoring remains open.
+- **Status:** Unresolved recurrence in Stable 1.0.8 — Chrome on workspace 1 is incorrectly floating
+  in the user-provided report. The prior signed Codex rounding check did not establish a complete fix.
+- **1.0.8 Chrome evidence:** Focused report at 2026-09-05T17:01:22.529Z identifies Chrome
+  `68416:18723`, standard AX window at `(4,34,956,1531)`, with fresh position/size writable flags
+  true, no exclusion, automatic override and unpaused management. Admission is retained as
+  `managed-dialog/fixed-size-standard-window`, recovery active, automatically floating, and
+  absent from the tiled tree. Workspace-switch history confirms position-only handling; the
+  initial demotion is outside the attached history. Report retained at
+  `.build/Logs/wr123/recurrence-1.0.8/chrome-focused-window.txt`.
+- **Source-backed recovery boundary:** The retained classification persists until an observed
+  size change permits fresh capability probes after the cooldown. Writable flags alone do not
+  clear it. A witnessed manual Chrome resize is the next discriminating check; no live window
+  operations or speculative classifier changes were made for this report.
+- **Diagnostic follow-up:** Schema 3 now retains initial-capability versus ineffective-resize
+  provenance, source/result, known before/requested/after frames, seed time, baseline, last probe,
+  and the current recovery gate for the lifetime of that window's recovery state. This covers
+  background failures without a command correlation, which Stable's recent-history buffer never
+  retains. Quick App/quit paths explicitly mark unobserved pre-write geometry unavailable.
+  No classification or AX-write behavior changed. The 181 focused Workspace Definition, Window
+  Admission Fixture and Focused Diagnostic tests pass; independent review and diff checks pass.
+  Source is uncommitted. On maintainer approval the signed diagnostic Dev build
+  `7ba533fe033f-dirty` was installed at `/Applications/WindowRanger Dev.app`; runtime session
+  `38F6F345-0932-45A4-B902-CEB04E21D51A` is running, unpaused and AX trusted. Installed code contains
+  the retained recovery fields, codesign verification passes, and Stable 1.0.8 remains installed
+  unchanged but stopped. Dev retains its separate preferences; profile/display bindings and focus
+  border differ from Stable and must be considered when comparing reproductions. Full-suite checks
+  remain at the next integration checkpoint. The original Chrome demotion remains unproven until a live
+  diagnostic build captures it; a matching failing regression and live reproduction are required
+  before calling the underlying tiling issue fixed.
 - **1.0.7 recurrence:** Before any restart, Codex `56738:24482` was displaced to `(625,30,3840,1530)`
   on Tiled workspace 2. AX reported standard, movable/resizable, non-fullscreen and non-minimized;
   management was unpaused, with no rule exclusion. The tiled tree initially still contained it.

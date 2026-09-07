@@ -19,6 +19,12 @@ signing, notarization, stapling, and release packaging. See
 [First GitHub release](first-github-release.md). After the process is proven, the credentialed
 portion may move to a protected CI environment.
 
+The PR context remains `Verify source and unsigned build`; push verification uses
+`Integration build and packaging`. Narrow release-bookkeeping changes still run deterministic
+release/tooling checks but avoid repeating application compilation. All other changes preserve
+the application gates. See [verification reuse](first-github-release.md#verification-reuse)
+for the exact allowlist and local receipt requirements.
+
 ## Channel contract
 
 | Channel | Source | Version example | Audience | Delivery and support |
