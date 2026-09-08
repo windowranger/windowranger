@@ -125,6 +125,45 @@ final class TiledResizePreviewTests: XCTestCase {
         )
     }
 
+    func testCapturedClaudeLeftEdgeResizesDoNotBecomeMovesWhenPointerAndFrameDisagree() {
+        let expected = WindowFrame(
+            position: CGPoint(x: 1923, y: 30), size: CGSize(width: 1917, height: 1531)
+        )
+        // Frames are from the live failure. Pointer offsets model asynchronous sampling;
+        // the reports did not record the actual pointer coordinates.
+        for left: CGFloat in [1685, 1537, 2430] {
+            let observed = WindowFrame(
+                position: CGPoint(x: left, y: 30), size: CGSize(width: 3840 - left, height: 1531)
+            )
+            for offset: CGFloat in [-24, 24] {
+                XCTAssertNil(TiledManualDragClassifier.classify(
+                    expectedFrame: expected, observedFrame: observed,
+                    pointer: CGPoint(x: left + offset, y: 700)
+                ), "An uncertain resize must not start a move that restores the old width")
+            }
+            XCTAssertEqual(TiledManualDragClassifier.classify(
+                expectedFrame: expected, observedFrame: observed,
+                pointer: CGPoint(x: left, y: 700)
+            ), .resize(.left))
+        }
+    }
+
+    func testAnchoredTopResizeWithUnsynchronisedPointerDoesNotBecomeMove() {
+        XCTAssertNil(TiledManualDragClassifier.classify(
+            expectedFrame: WindowFrame(position: CGPoint(x: 100, y: 200), size: CGSize(width: 500, height: 400)),
+            observedFrame: WindowFrame(position: CGPoint(x: 100, y: 260), size: CGSize(width: 500, height: 340)),
+            pointer: CGPoint(x: 350, y: 284)
+        ))
+    }
+
+    func testAnchoredTopLeftResizeWithPointerOnOnlyOneEdgeDoesNotBecomeMove() {
+        XCTAssertNil(TiledManualDragClassifier.classify(
+            expectedFrame: WindowFrame(position: CGPoint(x: 100, y: 200), size: CGSize(width: 500, height: 400)),
+            observedFrame: WindowFrame(position: CGPoint(x: 160, y: 260), size: CGSize(width: 440, height: 340)),
+            pointer: CGPoint(x: 160, y: 284)
+        ))
+    }
+
     func testCornerResizeRequiresPointerOnBothChangedEdges() {
         let expected = WindowFrame(
             position: CGPoint(x: 100, y: 200),
@@ -461,5 +500,144 @@ final class TiledResizePreviewTests: XCTestCase {
         let data = try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
         try data.write(to: URL(fileURLWithPath: outputPath), options: .atomic)
         XCTAssertGreaterThan(data.count, 1_000)
+    }
+
+    func testManagedResizeConstraintsLearnsLargerReadbackAsProvisionalMinimum() {
+        let now = Date(timeIntervalSinceReferenceDate: 100)
+        var constraints = ManagedResizeConstraints()
+
+        XCTAssertEqual(
+            constraints.observe(
+                requested: CGSize(width: 500, height: 400),
+                actual: CGSize(width: 600, height: 400),
+                now: now
+            ),
+            .constrained
+        )
+        XCTAssertEqual(constraints.minimumSize(at: now), CGSize(width: 600, height: 0))
+        XCTAssertEqual(constraints.nextRetryDate, now.addingTimeInterval(1))
+    }
+
+    func testManagedResizeConstraintsDefersGrowthRefusalWithoutInventingMinimum() {
+        let now = Date(timeIntervalSinceReferenceDate: 100)
+        var constraints = ManagedResizeConstraints()
+
+        XCTAssertEqual(
+            constraints.observe(
+                requested: CGSize(width: 800, height: 500),
+                actual: CGSize(width: 600, height: 500),
+                now: now
+            ),
+            .deferred
+        )
+        XCTAssertEqual(constraints.minimumSize(at: now), .zero)
+        XCTAssertTrue(constraints.retryDue(now: now.addingTimeInterval(1)))
+    }
+
+    func testManagedResizeConstraintsLearnsPartialConstraintButDefersShrink() {
+        let now = Date(timeIntervalSinceReferenceDate: 100)
+        var constraints = ManagedResizeConstraints()
+
+        XCTAssertEqual(
+            constraints.observe(
+                requested: CGSize(width: 500, height: 500),
+                actual: CGSize(width: 600, height: 490),
+                now: now
+            ),
+            .deferred
+        )
+        XCTAssertEqual(constraints.minimumSize(at: now), CGSize(width: 600, height: 0))
+    }
+
+    func testManagedResizeConstraintsInvalidatesBoundWhenReadbackIsSmaller() {
+        let now = Date(timeIntervalSinceReferenceDate: 100)
+        var constraints = ManagedResizeConstraints()
+        _ = constraints.observe(
+            requested: CGSize(width: 500, height: 400),
+            actual: CGSize(width: 600, height: 400),
+            now: now
+        )
+
+        XCTAssertTrue(constraints.observeActual(CGSize(width: 550, height: 400), now: now))
+        XCTAssertEqual(constraints.minimumSize(at: now), .zero)
+    }
+
+    func testManagedResizeConstraintsExpiresProvisionalBounds() {
+        let now = Date(timeIntervalSinceReferenceDate: 100)
+        var constraints = ManagedResizeConstraints()
+        _ = constraints.observe(
+            requested: CGSize(width: 500, height: 400),
+            actual: CGSize(width: 600, height: 400),
+            now: now
+        )
+
+        XCTAssertEqual(
+            constraints.minimumSize(at: now.addingTimeInterval(ManagedResizeConstraints.constraintLifetime)),
+            .zero
+        )
+    }
+
+    func testManagedResizeConstraintsRejectsMissingAndNonFiniteReadback() {
+        let now = Date(timeIntervalSinceReferenceDate: 100)
+        var constraints = ManagedResizeConstraints()
+
+        XCTAssertEqual(
+            constraints.observe(requested: CGSize(width: 500, height: 400), actual: nil, now: now),
+            .unavailable
+        )
+        XCTAssertEqual(
+            constraints.observe(
+                requested: CGSize(width: 500, height: 400),
+                actual: CGSize(width: CGFloat.infinity, height: 400),
+                now: now
+            ),
+            .unavailable
+        )
+    }
+
+    func testManagedResizeConstraintsSettlesOnEventualTargetAndDoesNotRetry() {
+        let now = Date(timeIntervalSinceReferenceDate: 100)
+        var constraints = ManagedResizeConstraints()
+        _ = constraints.observe(
+            requested: CGSize(width: 800, height: 500),
+            actual: CGSize(width: 600, height: 500),
+            now: now
+        )
+
+        XCTAssertEqual(
+            constraints.observe(
+                requested: CGSize(width: 800, height: 500),
+                actual: CGSize(width: 800, height: 500),
+                now: now.addingTimeInterval(1)
+            ),
+            .applied
+        )
+        XCTAssertNil(constraints.nextRetryDate)
+        XCTAssertFalse(constraints.retryDue(now: now.addingTimeInterval(100)))
+    }
+
+    func testManagedResizeConstraintsBoundsRetriesAndNewTargetRearmsThem() {
+        let now = Date(timeIntervalSinceReferenceDate: 100)
+        var constraints = ManagedResizeConstraints()
+        let requested = CGSize(width: 800, height: 500)
+        let actual = CGSize(width: 600, height: 500)
+
+        _ = constraints.observe(requested: requested, actual: actual, now: now)
+        XCTAssertEqual(constraints.nextRetryDate, now.addingTimeInterval(1))
+        _ = constraints.observe(requested: requested, actual: actual, now: now.addingTimeInterval(1))
+        XCTAssertEqual(constraints.nextRetryDate, now.addingTimeInterval(3))
+        _ = constraints.observe(requested: requested, actual: actual, now: now.addingTimeInterval(3))
+        XCTAssertEqual(constraints.nextRetryDate, now.addingTimeInterval(8))
+        _ = constraints.observe(requested: requested, actual: actual, now: now.addingTimeInterval(8))
+        XCTAssertNil(constraints.nextRetryDate)
+        XCTAssertTrue(constraints.retryExhausted)
+
+        _ = constraints.observe(
+            requested: CGSize(width: 801, height: 500),
+            actual: actual,
+            now: now.addingTimeInterval(8)
+        )
+        XCTAssertEqual(constraints.nextRetryDate, now.addingTimeInterval(9))
+        XCTAssertFalse(constraints.retryExhausted)
     }
 }

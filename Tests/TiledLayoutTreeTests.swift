@@ -938,6 +938,40 @@ final class TiledLayoutTreeTests: XCTestCase {
         XCTAssertEqual(frames[b], CGRect(x: 430, y: 0, width: 560, height: 700))
     }
 
+    func testCapturedChromeAndClaudeResizeGeometryCanBeAdoptedWithoutRestoringEqualSplit() throws {
+        // WR-123, 2026-09-08: isolate the reported geometry from unknown pointer/focus timing.
+        let tree = TiledNode.split(
+            axis: .horizontal, ratio: 0.5, first: .window(a), second: .window(b)
+        )
+        let bounds = CGRect(x: 0, y: 30, width: 3840, height: 1531)
+        let config = WorkspaceLayoutConfiguration(
+            orientation: .horizontal,
+            accordionPadding: 250,
+            gaps: WorkspaceLayoutGaps(
+                innerHorizontal: 5, innerVertical: 5,
+                outerTop: 0, outerRight: 0, outerBottom: 0, outerLeft: 0
+            )
+        )
+        // Chrome's original report and Claude's three confirmed left-edge resize samples.
+        for left: CGFloat in [2079, 1685, 1537, 2430] {
+            let resized = try XCTUnwrap(TiledLayoutEngine.resizedToMatchObservedFrame(
+                tree,
+                focusedWindow: b,
+                observedFrame: WindowFrame(
+                    position: CGPoint(x: left, y: 30),
+                    size: CGSize(width: 3840 - left, height: 1531)
+                ),
+                displayBounds: bounds,
+                configuration: config
+            ))
+            let frames = try rects(resized, bounds: bounds, configuration: config)
+            let resizedWindow = try XCTUnwrap(frames[b])
+            XCTAssertEqual(resizedWindow.minX, left, accuracy: 1)
+            XCTAssertEqual(resizedWindow.width, 3840 - left, accuracy: 1)
+            XCTAssertEqual(resizedWindow.maxX, bounds.maxX, accuracy: 1)
+        }
+    }
+
     func testObservedManualResizePreservesAnchoredNestedDividerInAbsolutePosition() throws {
         let tree = TiledNode.split(
             axis: .horizontal,
@@ -1543,6 +1577,177 @@ final class TiledLayoutTreeTests: XCTestCase {
             state.tiledTrees
         )
         XCTAssertNil(WorkspaceStateStore(fileURL: fileURL) { "different-session" }.load())
+    }
+
+    func testConstrainedTreeKeepsCapturedChromeAndClaudeAtTheirMinimumWidths() throws {
+        let tree = TiledNode.split(
+            axis: .horizontal, ratio: 0.9, first: .window(a), second: .window(b)
+        )
+        let bounds = CGRect(x: 0, y: 30, width: 3_840, height: 1_531)
+        let configuration = WorkspaceLayoutConfiguration(
+            orientation: .horizontal,
+            accordionPadding: 250,
+            gaps: .aeroSpaceUserDefaults
+        )
+
+        let constrained = try XCTUnwrap(TiledLayoutEngine.constrained(
+            tree,
+            in: bounds,
+            configuration: configuration,
+            minimumSizes: [b: CGSize(width: 600, height: 1)]
+        ))
+        let frames = try rects(constrained, bounds: bounds, configuration: configuration)
+
+        XCTAssertGreaterThanOrEqual(frames[b]!.width, 600)
+        XCTAssertEqual(frames[a]!.maxX + 5, frames[b]!.minX)
+        XCTAssertEqual(frames[a]!.minX, bounds.minX)
+        XCTAssertEqual(frames[b]!.maxX, bounds.maxX)
+    }
+
+    func testObservedManagedResizeConstraintReflowsBothParticipantsAndSettlesAtClampedEndpoint() throws {
+        let now = Date(timeIntervalSinceReferenceDate: 100)
+        var claudeConstraint = ManagedResizeConstraints()
+        XCTAssertEqual(
+            claudeConstraint.observe(
+                requested: CGSize(width: 500, height: 1_531),
+                actual: CGSize(width: 600, height: 1_531),
+                now: now
+            ),
+            .constrained
+        )
+
+        let tree = TiledNode.split(
+            axis: .horizontal, ratio: 0.9, first: .window(a), second: .window(b)
+        )
+        let bounds = CGRect(x: 0, y: 30, width: 3_840, height: 1_531)
+        let configuration = WorkspaceLayoutConfiguration(
+            orientation: .horizontal,
+            accordionPadding: 250,
+            gaps: .aeroSpaceUserDefaults
+        )
+        let constrained = try XCTUnwrap(TiledLayoutEngine.constrained(
+            tree,
+            in: bounds,
+            configuration: configuration,
+            minimumSizes: [b: claudeConstraint.minimumSize(at: now)]
+        ))
+        let frames = try rects(constrained, bounds: bounds, configuration: configuration)
+        let claudeTarget = try XCTUnwrap(frames[b])
+
+        XCTAssertEqual(claudeTarget.width, 600)
+        XCTAssertEqual(frames[a]!.width, 3_235)
+        XCTAssertEqual(Set(frames.keys), Set([a, b]))
+        XCTAssertNoThrow(try TiledLayoutEngine.validated(constrained, participants: [a, b]))
+
+        let clampedActual = CGSize(
+            width: max(claudeTarget.width, 600),
+            height: claudeTarget.height
+        )
+        XCTAssertEqual(
+            claudeConstraint.observe(requested: claudeTarget.size, actual: clampedActual, now: now),
+            .applied
+        )
+    }
+
+    func testConstrainedTreeAggregatesNestedMinimumSizesAcrossBothAxes() throws {
+        let tree = TiledNode.split(
+            axis: .horizontal,
+            ratio: 0.2,
+            first: .split(axis: .vertical, ratio: 0.5, first: .window(a), second: .window(b)),
+            second: .window(c)
+        )
+        let configuration = WorkspaceLayoutConfiguration(
+            orientation: .automatic,
+            accordionPadding: 250,
+            gaps: WorkspaceLayoutGaps(
+                innerHorizontal: 5, innerVertical: 5,
+                outerTop: 11, outerRight: 17, outerBottom: 13, outerLeft: 19
+            )
+        )
+        let bounds = CGRect(x: 0, y: 0, width: 2_000, height: 1_500)
+        let constrained = try XCTUnwrap(TiledLayoutEngine.constrained(
+            tree,
+            in: bounds,
+            configuration: configuration,
+            minimumSizes: [
+                a: CGSize(width: 700, height: 700),
+                b: CGSize(width: 800, height: 700),
+                c: CGSize(width: 600, height: 1),
+            ]
+        ))
+        let frames = try rects(constrained, bounds: bounds, configuration: configuration)
+
+        XCTAssertGreaterThanOrEqual(frames[a]!.width, 700)
+        XCTAssertGreaterThanOrEqual(frames[b]!.width, 800)
+        XCTAssertGreaterThanOrEqual(frames[a]!.height, 700)
+        XCTAssertGreaterThanOrEqual(frames[b]!.height, 700)
+        XCTAssertGreaterThanOrEqual(frames[c]!.width, 600)
+        XCTAssertEqual(frames[a]!.minX, 19, "Outer padding is applied only to the root bounds")
+        XCTAssertEqual(frames[c]!.maxX, 1_983)
+        XCTAssertEqual(frames[a]!.minY, 11)
+        XCTAssertEqual(frames[b]!.maxY, 1_487)
+    }
+
+    func testImpossibleMinimumsRejectBothTheConstrainedTreeAndStaleAcceptedFrames() {
+        let tree = TiledNode.split(
+            axis: .horizontal, ratio: 0.5, first: .window(a), second: .window(b)
+        )
+        let bounds = CGRect(x: 0, y: 0, width: 1_000, height: 1_000)
+        let minimumSizes = [
+            a: CGSize(width: 600, height: 1),
+            b: CGSize(width: 600, height: 1),
+        ]
+
+        XCTAssertNil(TiledLayoutEngine.constrained(
+            tree,
+            in: bounds,
+            configuration: WorkspaceLayoutConfiguration(
+                orientation: .horizontal,
+                accordionPadding: 250,
+                gaps: .aeroSpaceUserDefaults
+            ),
+            minimumSizes: minimumSizes
+        ))
+        let staleFrames = [
+            a: WindowFrame(position: CGPoint(x: 0, y: 0), size: CGSize(width: 500, height: 1_000)),
+            b: WindowFrame(position: CGPoint(x: 500, y: 0), size: CGSize(width: 500, height: 1_000)),
+        ]
+        XCTAssertNil(TiledLayoutEngine.reusableAcceptedFrames(
+            staleFrames,
+            participants: [a, b],
+            in: bounds,
+            minimumSizes: minimumSizes
+        ))
+        XCTAssertEqual(Set(tree.windowKeys), Set([a, b]), "Infeasibility must not delete participants")
+    }
+
+    func testConstrainedTreePreservesUnconstrainedTreeAndRoundedMinimumFrame() throws {
+        let tree = TiledNode.split(
+            axis: .horizontal, ratio: 0.499, first: .window(a), second: .window(b)
+        )
+        let configuration = WorkspaceLayoutConfiguration(
+            orientation: .horizontal,
+            accordionPadding: 250,
+            gaps: .aeroSpaceUserDefaults
+        )
+        let bounds = CGRect(x: 0, y: 0, width: 1_206, height: 700)
+
+        XCTAssertEqual(TiledLayoutEngine.constrained(
+            tree, in: bounds, configuration: configuration, minimumSizes: [:]
+        ), tree)
+        XCTAssertEqual(TiledLayoutEngine.constrained(
+            tree, in: bounds, configuration: configuration, minimumSizes: [a: .zero, b: .zero]
+        ), tree)
+
+        let constrained = try XCTUnwrap(TiledLayoutEngine.constrained(
+            tree,
+            in: bounds,
+            configuration: configuration,
+            minimumSizes: [a: CGSize(width: 600, height: 1)]
+        ))
+        let frames = try rects(constrained, bounds: bounds, configuration: configuration)
+        XCTAssertEqual(frames[a]!.width, 600)
+        XCTAssertGreaterThanOrEqual(frames[a]!.width, 600)
     }
 
     private func configuration() -> WorkspaceLayoutConfiguration {
