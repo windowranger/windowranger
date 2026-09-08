@@ -3860,13 +3860,39 @@ smallest useful outcome and acceptance boundary.
 
 ### WR-131 — Release WindowRanger 1.0.10
 
-- **Status:** Release in progress; explicitly authorized by the maintainer.
-- **Scope:** Publish the WR-123 minimum-size tiling correction as Stable 1.0.10/build 23,
+- **Status:** Corrected release explicitly authorized after maintainer live acceptance. Build 23
+  is superseded and remains unpublished; build 24 is allocated for fresh promotion and packaging.
+- **Scope:** Publish the WR-123 minimum-size and inward-growth correction as Stable 1.0.10/build 24,
   with immutable signed/notarized artifacts, exact-package verification, feed/site and tap updates.
 - **Acceptance evidence:** Maintainer reported the edge-double-click failure fixed in the installed
   structural candidate. Its exact source passed all 957 non-hosted tests. Broader resume
   recurrence monitoring remains open under WR-123.
-- **Remaining:** Source promotion, exact-release gates, packaged-app verification and publication.
+- **Completed:** PRs #131/#132 promoted source to main `1c0ab4ed4f86`; PR #133 back-merged
+  Stable into develop. All 957 distribution tests, static analysis, signed archive/export,
+  app/DMG notarization, Gatekeeper and local asset verification passed. The exact DMG app
+  was installed as 1.0.10/build 23; all 71 package files matched the export, settings were
+  preserved, and Accessibility permission was restored after switching signing identities.
+- **New evidence:** During final packaged-app testing, the maintainer reported that resizing
+  Chrome with keys becomes confused on Claude. The precise key sequence, visible outcome,
+  are now supported by captured Debug diagnostics. At 20:08:16.830Z (sequence 818),
+  Claude remained at x=2473,width=1367 when requested x=2423,width=1417. The writer
+  returned `initial-size-write-ignored` before attempting position. Chrome accepted its
+  paired shrink. All 49 keyboard commands targeted Chrome; Claude had 27 deferred
+  resize readbacks, retained membership, and no learned minimum. The likely mechanism
+  is size-first growth against the display's right edge: moving left would make room,
+  but the early no-op return prevents that move. Native move-first confirmation and a
+  deterministic regression remain pending; the earlier minimum-share feedback hypothesis
+  does not explain this captured failure.
+  At the maintainer's request, the same source `1c0ab4ed4f86` was installed as the separate
+  signed Debug app. All 71 installed files matched its build; Accessibility was granted and
+  only WindowRanger Dev was running. Current profiles/shortcuts were copied into backed-up
+  Debug settings; semantic comparison preserved profiles and display bindings, with only
+  Debug's expected iCloud/Open-at-Login restrictions. Fresh persistent diagnostics are active
+  under session `CA2A4F16-C382-47B5-B204-16A807B1FCB4`.
+- **Remaining:** Promote the live-accepted WR-123 correction and re-establish exact
+  packaged acceptance before publication. No v1.0.10 tag, GitHub release, feed, site or tap
+  publication has been performed. Any product correction requires a fresh allocated build
+  and newly notarized artifacts; build 23 must not be silently replaced.
 
 ### WR-129 — Reduce repetitive release verification and coordination
 
@@ -3905,6 +3931,29 @@ smallest useful outcome and acceptance boundary.
   a stale report from a different opening; verify in a signed installed app.
 
 ### WR-123 — Recover tiling when a formerly fixed-size window becomes resizable
+
+- **Keyboard reverse-resize follow-up (8 September):** Captured Debug session
+  `CA2A4F16-C382-47B5-B204-16A807B1FCB4` shows Claude ignoring inward growth while
+  Chrome accepts the paired shrink. Sequence 818 requests `(2423,30;1417x1531)` from
+  `(2473,30;1367x1531)`; `initial-size-write-ignored` prevents the position write.
+  All 49 keyboard commands target Chrome; membership stays normal and no minimum is learned.
+  The source fix opts clearly normal windows in central tiled solves into a bounded
+  move-then-size fallback for inward growth after a successful-but-ignored size write. Explicit
+  rejections and ambiguous dialogs retain the no-position safety boundary. It verifies the whole
+  frame and attempts rollback on failure. Test isolation and all 265 focused tests passed across
+  WorkspaceDefinition, WindowAdmissionFixture,
+  TiledLayoutTree and TiledResizePreview suites. The regression simulates the captured
+  screen-edge clamp and verifies failed/delayed writes, rollback, and unchanged default safety.
+  Broader release gates are deferred until the next release checkpoint. The maintainer-authorized
+  Debug install now runs `1d60876b4d62-dirty`, patch SHA-256
+  `d451102f5049107592048081b42d2d2677e5d507aaf0fa4383b7345342605df4`.
+  All 71 installed files match the signed build, configuration is preserved, Accessibility is
+  granted, and only WindowRanger Dev is running. Persistent logs use session
+  `5F6281FD-4F72-4119-9FD5-3B26D90D8524`. The previous Debug bundle is retained for rollback.
+  After testing this installed correction, the maintainer reported “perfect!”, confirming the
+  captured Chrome keyboard reverse-resize / Claude growth recurrence now passes. This is live
+  acceptance of that scenario, not broader resume validation or acceptance of a future package.
+  The defective Stable build 23 remains withheld pending corrected release packaging.
 
 - **Maintainer live acceptance:** After installing structural candidate patch
   `ae8c38868425f6ec2b0228ac1f6efdc59c0f4d09fdad4cb258cee4af21dc125a`, maintainer reported

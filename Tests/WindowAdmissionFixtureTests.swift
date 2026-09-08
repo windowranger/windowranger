@@ -2,6 +2,23 @@ import ApplicationServices
 import XCTest
 
 final class WindowAdmissionFixtureTests: XCTestCase {
+    func testTiledGrowthRepositionExcludesAmbiguousDialogsAndFixedSizeWindows() {
+        XCTAssertTrue(WorkspaceEngine.allowsTiledGrowthReposition(
+            for: decision(.managedNormal, .normalWindow)
+        ))
+        for subrole in [kAXDialogSubrole as String, kAXFloatingWindowSubrole as String] {
+            let admission = AccessibilityWindow.admissionDecision(for: fixtureMetadata(
+                subrole: subrole,
+                fullscreenButton: .present
+            ))
+            XCTAssertEqual(admission, decision(.managedNormal, .ambiguousDialogMetadata))
+            XCTAssertFalse(WorkspaceEngine.allowsTiledGrowthReposition(for: admission))
+        }
+        XCTAssertFalse(WorkspaceEngine.allowsTiledGrowthReposition(
+            for: decision(.managedDialog, .fixedSizeStandardWindow)
+        ))
+    }
+
     func testPrivacySafeAdmissionFixtureCorpus() {
         for fixture in fixtures {
             XCTAssertEqual(

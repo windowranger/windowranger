@@ -171,8 +171,18 @@ negative probe is retained so the ordinary engine refresh does not repeat failed
 Proven fixed-size windows use position-only writes for visibility, display reconciliation, Quick App
 transitions, and quit recovery; neither an explicit per-window override nor another frame path can
 force a resize-first operation. An ignored or rejected frame write on a normally admitted window
-does not change its admission. The size-position-size setter still stops before moving a window
-whose initial size write was ineffective, but the result now feeds managed resize constraints.
+does not change its admission. The size-position-size setter defaults to stopping before moving
+a window whose initial size write was ineffective. Central visible tiled layout solves, including
+keyboard resizing, may opt clearly normal windows into one position-then-size fallback after a
+successful-but-ignored size write. Explicit rejection and ambiguous dialog metadata never qualify.
+The target must grow without shrinking either dimension and move
+inward without extending the original right or bottom edge. This permits a right-hand tile to move
+left before growing, avoiding a size write clamped at the display edge. The fallback requires full
+frame readback; failure attempts a bounded restoration of the original frame and reports rollback
+failure separately. Dialog, parking, floating, and other frame writers do not opt in. Results still
+feed managed resize constraints. Direct manual-gesture commits and separate wake-retry frame
+writers retain their existing sequence; this correction is scoped to the captured keyboard/layout
+reconciliation failure.
 Fresh readback separates applied, constrained, deferred and unavailable sizes. An actual dimension
 larger than the requested one becomes a provisional per-window minimum for 30 seconds; observing
 a smaller size invalidates that bound. A refused growth request does not invent a minimum.
@@ -265,6 +275,7 @@ later reports layer zero with corroborating controls, it enters as an automatica
 an unavailable layer remains conservatively managed. Frame writes also stop before changing
 position when the initial size write rejects twice or repeatedly succeeds without changing the
 observed size, so a fixed-size surface cannot be displaced toward a layout frame it cannot occupy.
+The normal-tiled inward-growth fallback above is an explicit exception, never enabled for dialogs.
 User-triggered Refresh
 performs read-only capability queries for already tracked windows, while ignored or unsupported
 surfaces capture the same evidence once before they are discarded. The snapshot contains no window

@@ -28,4 +28,5 @@
 20	1.0.7	published	GitHub Stable release v1.0.7
 21	1.0.8	published	GitHub Stable release v1.0.8
 22	1.0.9	published	GitHub Stable release v1.0.9
-23	1.0.10	allocated	Stable minimum-size tiling correction WR-123
+23	1.0.10	superseded	Withheld after keyboard reverse-resize failure; never published
+24	1.0.10	allocated	Live-validated inward-growth correction and minimum-size tiling WR-123
