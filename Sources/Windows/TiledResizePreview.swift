@@ -162,8 +162,9 @@ enum TiledManualDragIntent: Equatable, Sendable {
 
 enum TiledManualDragClassifier {
     /// AX can briefly report small size changes during an ordinary title-bar move. A resize is
-    /// therefore credible only when the pointer is still on every edge whose geometry changed.
-    /// Left/top resizes remain distinguishable from moves even though both position and size move.
+    /// therefore claimed only when the pointer is on every edge whose geometry changed. If the
+    /// remaining edges are stationary, defer a mismatched pointer sample instead of claiming a
+    /// move: AX geometry and pointer location are read separately during a native resize.
     static func classify(
         expectedFrame: WindowFrame,
         observedFrame: WindowFrame,
@@ -184,6 +185,17 @@ enum TiledManualDragClassifier {
         )
         if draggedEdges.containsPointer(pointer, on: observedFrame, tolerance: edgeTolerance) {
             return .resize(draggedEdges)
+        }
+
+        let expected = CGRect(origin: expectedFrame.position, size: expectedFrame.size)
+        let observed = CGRect(origin: observedFrame.position, size: observedFrame.size)
+        let stationaryOtherEdges =
+            (draggedEdges.contains(.left) || abs(observed.minX - expected.minX) <= sizeTolerance) &&
+            (draggedEdges.contains(.right) || abs(observed.maxX - expected.maxX) <= sizeTolerance) &&
+            (draggedEdges.contains(.top) || abs(observed.minY - expected.minY) <= sizeTolerance) &&
+            (draggedEdges.contains(.bottom) || abs(observed.maxY - expected.maxY) <= sizeTolerance)
+        if !draggedEdges.isEmpty, stationaryOtherEdges {
+            return nil
         }
 
         let moved = abs(observedFrame.position.x - expectedFrame.position.x) > positionTolerance ||
@@ -617,5 +629,155 @@ private final class TiledResizePreviewPanel: NSPanel {
 
     override var canBecomeMain: Bool {
         TiledResizePreviewPanelPolicy.nonActivating.canBecomeMain
+    }
+}
+
+/// Learns short-lived, provisional minimum dimensions from managed resize readback.
+///
+/// A larger-than-requested readback can indicate an app minimum size, while a smaller readback
+/// only means the resize has not settled yet. The policy deliberately never turns that latter
+/// observation into a minimum constraint; the engine owns settling and applying retries.
+struct ManagedResizeConstraints {
+    enum Outcome: Equatable, Sendable {
+        case applied
+        case constrained
+        case deferred
+        case unavailable
+    }
+
+    static let tolerance: CGFloat = 1
+    static let constraintLifetime: TimeInterval = 30
+
+    var minimumSize: CGSize
+    var lastOutcome: Outcome?
+    var lastRequestedSize: CGSize?
+    var lastActualSize: CGSize?
+    var nextRetryDate: Date?
+    var retryExhausted: Bool { retryCount > 3 }
+
+    private var widthExpiresAt: Date?
+    private var heightExpiresAt: Date?
+    private var retryCount = 0
+
+    init(minimumSize: CGSize = .zero) {
+        self.minimumSize = minimumSize
+        lastOutcome = nil
+        lastRequestedSize = nil
+        lastActualSize = nil
+        nextRetryDate = nil
+        widthExpiresAt = minimumSize.width > 0 ? .distantFuture : nil
+        heightExpiresAt = minimumSize.height > 0 ? .distantFuture : nil
+    }
+
+    /// Returns the currently valid provisional bounds without requiring mutable state.
+    func minimumSize(at now: Date) -> CGSize {
+        let widthIsValid = widthExpiresAt.map { now < $0 } ?? true
+        let heightIsValid = heightExpiresAt.map { now < $0 } ?? true
+        return CGSize(
+            width: widthIsValid ? minimumSize.width : 0,
+            height: heightIsValid ? minimumSize.height : 0
+        )
+    }
+
+    @discardableResult
+    mutating func observe(requested: CGSize, actual: CGSize?, now: Date) -> Outcome {
+        if lastRequestedSize != requested {
+            retryCount = 0
+            nextRetryDate = nil
+        }
+        lastRequestedSize = requested
+        guard Self.isValid(size: requested), let actual, Self.isValid(size: actual) else {
+            lastActualSize = nil
+            return record(.unavailable, now: now)
+        }
+
+        lastActualSize = actual
+        _ = observeActual(actual, now: now)
+
+        if Self.matches(actual, requested) {
+            retryCount = 0
+            nextRetryDate = nil
+            lastOutcome = .applied
+            return .applied
+        }
+        if actual.width > requested.width + Self.tolerance {
+            learn(width: actual.width, now: now)
+        }
+        if actual.height > requested.height + Self.tolerance {
+            learn(height: actual.height, now: now)
+        }
+        if actual.width < requested.width - Self.tolerance ||
+            actual.height < requested.height - Self.tolerance {
+            return record(.deferred, now: now)
+        }
+        return record(.constrained, now: now)
+    }
+
+    /// Accepts an independently sampled readback and only lowers learned bounds when evidence
+    /// proves they are stale. A matching last target can also settle a pending retry.
+    @discardableResult
+    mutating func observeActual(_ actual: CGSize?, now: Date) -> Bool {
+        guard let actual, Self.isValid(size: actual) else { return false }
+        lastActualSize = actual
+        minimumSize = minimumSize(at: now)
+        var changed = false
+        if minimumSize.width > 0, actual.width < minimumSize.width {
+            minimumSize.width = 0
+            widthExpiresAt = nil
+            changed = true
+        }
+        if minimumSize.height > 0, actual.height < minimumSize.height {
+            minimumSize.height = 0
+            heightExpiresAt = nil
+            changed = true
+        }
+        if let lastRequestedSize, Self.matches(actual, lastRequestedSize) {
+            retryCount = 0
+            nextRetryDate = nil
+            lastOutcome = .applied
+        }
+        return changed
+    }
+
+    func retryDue(now: Date) -> Bool {
+        guard let nextRetryDate else { return false }
+        return now >= nextRetryDate
+    }
+
+    private mutating func learn(width: CGFloat, now: Date) {
+        minimumSize = minimumSize(at: now)
+        minimumSize.width = max(minimumSize.width, width)
+        widthExpiresAt = now.addingTimeInterval(Self.constraintLifetime)
+    }
+
+    private mutating func learn(height: CGFloat, now: Date) {
+        minimumSize = minimumSize(at: now)
+        minimumSize.height = max(minimumSize.height, height)
+        heightExpiresAt = now.addingTimeInterval(Self.constraintLifetime)
+    }
+
+    private mutating func record(_ outcome: Outcome, now: Date) -> Outcome {
+        lastOutcome = outcome
+        retryCount += 1
+        guard retryCount <= 3 else {
+            nextRetryDate = nil
+            return outcome
+        }
+        let delay: TimeInterval
+        switch retryCount {
+        case 1: delay = 1
+        case 2: delay = 2
+        default: delay = 5
+        }
+        nextRetryDate = now.addingTimeInterval(delay)
+        return outcome
+    }
+
+    private static func isValid(size: CGSize) -> Bool {
+        size.width.isFinite && size.height.isFinite && size.width > 0 && size.height > 0
+    }
+
+    private static func matches(_ lhs: CGSize, _ rhs: CGSize) -> Bool {
+        abs(lhs.width - rhs.width) <= tolerance && abs(lhs.height - rhs.height) <= tolerance
     }
 }

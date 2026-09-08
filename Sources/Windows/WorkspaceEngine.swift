@@ -177,8 +177,27 @@ enum FixedSizeRecoveryGate: String, Equatable, Sendable {
     case cooldown = "cooldown"
 }
 
+enum IneffectiveResizeOperationalRecoveryGate: String, Equatable, Sendable {
+    case eligible
+    case notOperationalRecovery = "not-operational-recovery"
+    case managementPaused = "management-paused"
+    case notVisibleActive = "not-visible-active"
+    case ineligibleWindowShape = "ineligible-window-shape"
+    case cooldown
+    case exhausted
+}
+
+enum IneffectiveResizeOperationalProbeResult: String, Equatable, Sendable {
+    case notEligible = "not-eligible"
+    case capabilityNotAffirmative = "capability-not-affirmative"
+    case sizeRejected = "size-rejected"
+    case sizeUnchanged = "size-unchanged"
+    case sizeChanged = "size-changed"
+}
+
 struct FixedSizeRecoveryState: Equatable, Sendable {
     static let capabilityRecheckCooldown: TimeInterval = 5
+    static let operationalProbeDelays: [TimeInterval] = [5, 15, 45]
 
     private(set) var baselineSize: CGSize?
     var nextCapabilityRecheckDate: Date
@@ -191,6 +210,9 @@ struct FixedSizeRecoveryState: Equatable, Sendable {
     let seededAt: Date
     private(set) var lastCapabilityProbeDate: Date?
     private(set) var lastCapabilityProbeResult: String?
+    private(set) var operationalProbeCount: Int
+    private(set) var nextOperationalProbeDate: Date?
+    private(set) var lastOperationalProbeResult: String?
 
     static func seeded(
         observedSize: CGSize?,
@@ -200,6 +222,7 @@ struct FixedSizeRecoveryState: Equatable, Sendable {
         originalFrame: WindowFrame? = nil,
         requestedFrame: WindowFrame? = nil,
         observedFrameAtFailure: WindowFrame? = nil,
+        operationalProbeCount: Int = 0,
         now: Date
     ) -> FixedSizeRecoveryState {
         FixedSizeRecoveryState(
@@ -213,7 +236,13 @@ struct FixedSizeRecoveryState: Equatable, Sendable {
             observedFrameAtFailure: observedFrameAtFailure,
             seededAt: now,
             lastCapabilityProbeDate: nil,
-            lastCapabilityProbeResult: nil
+            lastCapabilityProbeResult: nil,
+            operationalProbeCount: operationalProbeCount,
+            nextOperationalProbeDate: reason == .ineffectiveResize &&
+                operationalProbeCount < operationalProbeDelays.count
+                ? now.addingTimeInterval(operationalProbeDelays[operationalProbeCount])
+                : nil,
+            lastOperationalProbeResult: nil
         )
     }
 
@@ -291,6 +320,73 @@ struct FixedSizeRecoveryState: Equatable, Sendable {
             ? "recovered"
             : "position-\(positionSettable.rawValue),size-\(sizeSettable.rawValue)"
         return recovered
+    }
+
+    func operationalRecoveryGate(
+        coreMetadata: WindowAdmissionMetadata,
+        isVisibleActive: Bool,
+        isPaused: Bool,
+        now: Date
+    ) -> IneffectiveResizeOperationalRecoveryGate {
+        guard seededReason == .ineffectiveResize else { return .notOperationalRecovery }
+        guard !isPaused else { return .managementPaused }
+        guard isVisibleActive else { return .notVisibleActive }
+        guard AccessibilityWindow.shouldCollectFixedSizeStandardWindowEvidence(coreMetadata) else {
+            return .ineligibleWindowShape
+        }
+        guard operationalProbeCount < Self.operationalProbeDelays.count else { return .exhausted }
+        guard let nextOperationalProbeDate, now >= nextOperationalProbeDate else { return .cooldown }
+        return .eligible
+    }
+
+    mutating func recordOperationalProbe(result: String, now: Date) {
+        operationalProbeCount += 1
+        lastOperationalProbeResult = result
+        nextOperationalProbeDate = operationalProbeCount < Self.operationalProbeDelays.count
+            ? now.addingTimeInterval(Self.operationalProbeDelays[operationalProbeCount])
+            : nil
+    }
+
+    /// Shared production/test policy for the bounded write itself. Affirmative AX capability is
+    /// necessary to try a probe but can never by itself release the safety classification.
+    mutating func attemptOperationalProbe(
+        coreMetadata: WindowAdmissionMetadata,
+        isVisibleActive: Bool,
+        isPaused: Bool,
+        isWriteAllowed: Bool,
+        hasAffirmativeCapabilities: Bool,
+        currentSize: CGSize?,
+        targetSize: CGSize?,
+        now: Date,
+        writeSize: (CGSize) -> Bool,
+        observeSize: () -> CGSize?
+    ) -> IneffectiveResizeOperationalProbeResult {
+        guard operationalRecoveryGate(
+            coreMetadata: coreMetadata,
+            isVisibleActive: isVisibleActive,
+            isPaused: isPaused,
+            now: now
+        ) == .eligible,
+        isWriteAllowed,
+        let currentSize,
+        let targetSize,
+        Self.isValidObservedSize(currentSize),
+        Self.isValidObservedSize(targetSize)
+        else { return .notEligible }
+        guard hasAffirmativeCapabilities else {
+            recordOperationalProbe(result: IneffectiveResizeOperationalProbeResult.capabilityNotAffirmative.rawValue, now: now)
+            return .capabilityNotAffirmative
+        }
+        let writeSucceeded = writeSize(targetSize)
+        let sizeChanged = observeSize().map {
+            Self.isValidObservedSize($0) &&
+                max(abs($0.width - currentSize.width), abs($0.height - currentSize.height)) > 1
+        } == true
+        let result: IneffectiveResizeOperationalProbeResult = !writeSucceeded
+            ? .sizeRejected
+            : sizeChanged ? .sizeChanged : .sizeUnchanged
+        recordOperationalProbe(result: result.rawValue, now: now)
+        return result
     }
 }
 
@@ -2423,6 +2519,11 @@ final class WorkspaceEngine {
     private var admissionDecisionByWindow: [WindowKey: WindowAdmissionDecision] = [:]
     private var admissionMetadataByWindow: [WindowKey: WindowAdmissionMetadata] = [:]
     private var fixedSizeRecoveryStateByWindow: [WindowKey: FixedSizeRecoveryState] = [:]
+    private var managedResizeConstraintsByWindow: [WindowKey: ManagedResizeConstraints] = [:]
+    private var lastAcceptedTiledFrames: [TiledLayoutPartitionKey: [WindowKey: WindowFrame]] = [:]
+    /// Survives a short-lived successful recovery followed by another ineffective resize, so one
+    /// flaky AX endpoint cannot reset its operational probe budget by oscillating admission.
+    private var operationalResizeProbeCountByWindow: [WindowKey: Int] = [:]
     private var resizeRecoveryNeedsImmediateReflow = false
     private var lastKnownWindowLayer: [WindowKey: Int] = [:]
     private var lastFocusedWindow: [UUID: WindowKey] = [:]
@@ -4871,6 +4972,15 @@ final class WorkspaceEngine {
             ("manual-tiled-move-preview-active", .value(String(manualTiledMovePreviewSession != nil))),
             ("manual-tiled-resize-preview-active", .value(String(manualTiledResizeSession != nil))),
         ]
+        if let constraints = managedResizeConstraintsByWindow[key] {
+            management.append(contentsOf: [
+                ("managed-resize-outcome", .value(constraints.lastOutcome.map { String(describing: $0) } ?? "none")),
+                ("managed-resize-retry-exhausted", .value(String(constraints.retryExhausted))),
+                ("managed-resize-provisional-minimum", .value(Self.diagnosticSize(constraints.minimumSize(at: Date())))),
+                ("managed-resize-last-requested-size", constraints.lastRequestedSize.map { .value(Self.diagnosticSize($0)) } ?? .unavailable("no request")),
+                ("managed-resize-last-observed-size", constraints.lastActualSize.map { .value(Self.diagnosticSize($0)) } ?? .unavailable("no observation")),
+            ])
+        }
         if let recoveryState = fixedSizeRecoveryStateByWindow[key] {
             let recoveryIsVisibleActive = tracked.map { tracked in
                 let rule = resolvedRule(for: tracked.bundleIdentifier)
@@ -4908,6 +5018,9 @@ final class WorkspaceEngine {
             management.append(("fixed-size-recovery-last-probe-at", recoveryState.lastCapabilityProbeDate.map { DiagnosticReportValue.value(Self.diagnosticTimestamp($0)) } ?? .unavailable("no recovery probe")))
             management.append(("fixed-size-recovery-last-probe-result", recoveryState.lastCapabilityProbeResult.map(DiagnosticReportValue.value) ?? .unavailable("no recovery probe")))
             management.append(("fixed-size-recovery-gate", recoveryGate))
+            management.append(("fixed-size-operational-trial-count", .value(String(recoveryState.operationalProbeCount))))
+            management.append(("fixed-size-operational-next-trial", recoveryState.nextOperationalProbeDate.map { .value(Self.diagnosticTimestamp($0)) } ?? .unavailable("no scheduled operational trial")))
+            management.append(("fixed-size-operational-last-result", recoveryState.lastOperationalProbeResult.map(DiagnosticReportValue.value) ?? .unavailable("no operational trial")))
         }
         if let tracked {
             let rule = resolvedRule(for: tracked.bundleIdentifier)
@@ -12601,6 +12714,9 @@ final class WorkspaceEngine {
         admissionDecisionByWindow.removeAll()
         admissionMetadataByWindow.removeAll()
         fixedSizeRecoveryStateByWindow.removeAll()
+        managedResizeConstraintsByWindow.removeAll()
+        lastAcceptedTiledFrames.removeAll()
+        operationalResizeProbeCountByWindow.removeAll()
         resizeRecoveryNeedsImmediateReflow = false
         lastKnownWindowLayer.removeAll()
         lastFocusedWindow.removeAll()
@@ -12871,8 +12987,14 @@ final class WorkspaceEngine {
                     : retainedAdmissionMetadata
                 var genericAdmissionDecision = AccessibilityWindow.admissionDecision(for: admissionMetadata)
                 let now = Date()
+                if var constraints = managedResizeConstraintsByWindow[key] {
+                    _ = constraints.observeActual(observedFrame?.size, now: now)
+                    managedResizeConstraintsByWindow[key] = constraints
+                }
                 if genericAdmissionDecision.disposition.evictsTrackedWindow {
+                    managedResizeConstraintsByWindow.removeValue(forKey: key)
                     fixedSizeRecoveryStateByWindow.removeValue(forKey: key)
+                    operationalResizeProbeCountByWindow.removeValue(forKey: key)
                 }
                 if var recoveryState = fixedSizeRecoveryStateByWindow[key] {
                     recoveryState.recordObservedSizeIfNeeded(observedFrame?.size)
@@ -13464,6 +13586,9 @@ final class WorkspaceEngine {
                 )
             }
             windows = windows.filter { !removedTrackedWindowKeys.contains($0.key) }
+            operationalResizeProbeCountByWindow = operationalResizeProbeCountByWindow.filter {
+                !removedTrackedWindowKeys.contains($0.key)
+            }
             lastFocusedWindow = WindowEnumerationLifecycle.pruning(
                 lastFocusedWindow,
                 removedWindowKeys: removedTrackedWindowKeys
@@ -13570,6 +13695,15 @@ final class WorkspaceEngine {
         admissionDecisionByWindow = admissionDecisionByWindow.filter { shouldRetainDiscoveryState($0.key) }
         admissionMetadataByWindow = admissionMetadataByWindow.filter { shouldRetainDiscoveryState($0.key) }
         fixedSizeRecoveryStateByWindow = fixedSizeRecoveryStateByWindow.filter {
+            shouldRetainDiscoveryState($0.key)
+        }
+        managedResizeConstraintsByWindow = managedResizeConstraintsByWindow.filter {
+            shouldRetainDiscoveryState($0.key)
+        }
+        lastAcceptedTiledFrames = lastAcceptedTiledFrames.filter {
+            $0.value.keys.allSatisfy(shouldRetainDiscoveryState)
+        }
+        operationalResizeProbeCountByWindow = operationalResizeProbeCountByWindow.filter {
             shouldRetainDiscoveryState($0.key)
         }
         lastKnownWindowLayer = lastKnownWindowLayer.filter { shouldRetainDiscoveryState($0.key) }
@@ -13763,15 +13897,46 @@ final class WorkspaceEngine {
             manualNonTiledCrossDisplayMoveSession != nil ||
             manualTiledResizeSession != nil
 
+        if performAXWrites, !isStartup, !topologyChanged, !lifecycleTransitionActive,
+           !isLeftMouseButtonPressed, !manualTiledInteractionInProgress,
+           !wakeReconciliationState.isSleeping, !wakeReconciliationState.isPending {
+            attemptIneffectiveResizeOperationalRecovery(
+                displays: displays,
+                correlationID: correlationID
+            )
+        }
+        // A synchronous operational probe can take long enough for a new drag to begin. Do not
+        // follow a successful probe immediately with an unrelated layout write in that case.
+        let isLeftMouseButtonPressedAfterOperationalRecovery = CGEventSource.buttonState(
+            .combinedSessionState,
+            button: .left
+        )
+
+        if performAXWrites, !isStartup, !topologyChanged, !lifecycleTransitionActive,
+           !manualTiledInteractionInProgress, !isLeftMouseButtonPressedAfterOperationalRecovery,
+           !wakeReconciliationState.isSleeping, !wakeReconciliationState.isPending {
+            let now = Date()
+            for key in Array(managedResizeConstraintsByWindow.keys) {
+                guard let tracked = windows[key], isWorkspaceActive(tracked.workspaceID),
+                      !isExcludedFromWorkspaceParticipation(tracked),
+                      !temporarilyDeferredWindowKeys.contains(key),
+                      fullscreenSessions[key] == nil,
+                      managedResizeConstraintsByWindow[key]?.retryDue(now: now) == true else { continue }
+                managedResizeConstraintsByWindow[key]?.nextRetryDate = nil
+                lastBackgroundLayoutSignature = nil
+            }
+        }
         let layoutSignatureBeforeApply = backgroundLayoutSignature(
             displays: displays,
             observedFrames: observedFrames
         )
         var didAttemptBackgroundVisibilityApplication = false
-        if performAXWrites, topologyChanged, !isStartup {
+        if performAXWrites, topologyChanged, !isStartup,
+           !isLeftMouseButtonPressedAfterOperationalRecovery {
             applyVisibility(displays: displays, correlationID: correlationID)
             didAttemptBackgroundVisibilityApplication = true
-        } else if performAXWrites, !manualTiledInteractionInProgress, Self.shouldApplyBackgroundLayout(
+        } else if performAXWrites, !manualTiledInteractionInProgress,
+                  !isLeftMouseButtonPressedAfterOperationalRecovery, Self.shouldApplyBackgroundLayout(
             previousSignature: lastBackgroundLayoutSignature,
             currentSignature: layoutSignatureBeforeApply,
             isStartup: isStartup
@@ -13779,12 +13944,14 @@ final class WorkspaceEngine {
             applyVisibility(displays: displays, correlationID: correlationID)
             didAttemptBackgroundVisibilityApplication = true
         }
-        if performAXWrites, !manualTiledInteractionInProgress, resizeRecoveryNeedsImmediateReflow {
+        if performAXWrites, !manualTiledInteractionInProgress,
+           !isLeftMouseButtonPressedAfterOperationalRecovery, resizeRecoveryNeedsImmediateReflow {
             resizeRecoveryNeedsImmediateReflow = false
             applyVisibility(displays: displays, correlationID: correlationID)
             didAttemptBackgroundVisibilityApplication = true
         }
-        if performAXWrites, !manualTiledInteractionInProgress {
+        if performAXWrites, !manualTiledInteractionInProgress,
+           !isLeftMouseButtonPressedAfterOperationalRecovery {
             lastBackgroundLayoutSignature = Self.settledBackgroundLayoutSignature(
                 observedSignature: layoutSignatureBeforeApply,
                 didApplyVisibility: didAttemptBackgroundVisibilityApplication
@@ -14470,6 +14637,7 @@ final class WorkspaceEngine {
                 .map(Self.diagnosticFrame) ?? "unknown"
             return [
                 "window=\(Self.diagnosticWindowKey(tracked.key))",
+                "resize-min=\(managedResizeConstraintsByWindow[tracked.key].map { Self.diagnosticSize($0.minimumSize(at: Date())) } ?? "none")",
                 tracked.workspaceID.uuidString,
                 tracked.displayPlacement?.displayIdentifier ?? "none",
                 currentFrame,
@@ -17195,8 +17363,10 @@ final class WorkspaceEngine {
         displays: [DisplaySnapshot],
         correlationID: String? = nil
     ) -> [WindowKey: WindowFrame] where S.Element == TrackedWindow {
+        let correlationID = correlationID ?? "layout-\(UUID().uuidString.prefix(8))"
         var positionChanges: [PositionChange] = []
         var frameChanges: [FrameChange] = []
+        var proposedTiledFrames: [TiledLayoutPartitionKey: [WindowKey: WindowFrame]] = [:]
         var expectedLayoutFrames: [WindowKey: WindowFrame] = [:]
         let layoutAvailableWindows = trackedWindows.filter {
             !isDropDownAppWindow($0.key) &&
@@ -17330,19 +17500,66 @@ final class WorkspaceEngine {
                         )
                         continue
                     }
-                    if let tree = TiledLayoutEngine.reconciled(
+                    if let proposedTree = TiledLayoutEngine.reconciled(
                         existingTree,
                         windowKeys: ordered.map(\.key),
                         weights: ordered.map { CGFloat(Self.validLayoutWeight($0.layoutWeight)) },
                         orientation: configuration.orientation.resolved(for: layoutBounds)
-                    ), let frames = try? TiledLayoutEngine.frames(
-                        for: tree,
-                        in: layoutBounds,
-                        configuration: configuration
                     ) {
-                        tiledTrees[partition] = tree
+                        let now = Date()
+                        let minimumSizes = Dictionary(uniqueKeysWithValues: ordered.map {
+                            ($0.key, managedResizeConstraintsByWindow[$0.key]?.minimumSize(at: now) ?? .zero)
+                        })
+                        let constrainedTree = TiledLayoutEngine.constrained(
+                            proposedTree, in: layoutBounds, configuration: configuration,
+                            minimumSizes: minimumSizes
+                        )
+                        let frames: [WindowKey: WindowFrame]
+                        var preservesCurrentSizes = false
+                        if let tree = constrainedTree,
+                           let solved = try? TiledLayoutEngine.frames(
+                            for: tree, in: layoutBounds, configuration: configuration
+                           ) {
+                            tiledTrees[partition] = tree
+                            frames = solved
+                            proposedTiledFrames[partition] = frames
+                        } else {
+                            // Never remove a participant to make an infeasible partition fit.
+                            // Only reuse an accepted layout if it still fits this display and set.
+                            let accepted = lastAcceptedTiledFrames[partition]
+                            let keys = Set(ordered.map(\.key))
+                            if let accepted = TiledLayoutEngine.reusableAcceptedFrames(
+                                accepted, participants: keys, in: layoutBounds, minimumSizes: minimumSizes
+                            ) {
+                                frames = accepted
+                            } else {
+                                preservesCurrentSizes = true
+                                // No valid previous layout: retain each window's recoverable size,
+                                // bringing parked windows on screen without forcing another shrink.
+                                frames = Dictionary(uniqueKeysWithValues: ordered.map {
+                                    let size = AccessibilityWindow.frame(of: $0.element)?.size ?? $0.restoreFrame.size
+                                    let position = CGPoint(
+                                        x: max(layoutBounds.minX, min($0.restoreFrame.position.x, layoutBounds.maxX - size.width)),
+                                        y: max(layoutBounds.minY, min($0.restoreFrame.position.y, layoutBounds.maxY - size.height))
+                                    )
+                                    return ($0.key, WindowFrame(position: position, size: size))
+                                })
+                            }
+                            diagnostics.log(category: "layout", event: "constraints-infeasible",
+                                correlation: correlationID, fields: [
+                                    "workspace": Self.shortIdentifier(workspaceID.uuidString),
+                                    "participant-count": String(ordered.count),
+                                    "fallback": preservesCurrentSizes ? "preserved-sizes" : "last-accepted",
+                                ])
+                        }
                         for tracked in ordered {
                             guard let frame = frames[tracked.key] else { continue }
+                            if preservesCurrentSizes {
+                                managedResizeConstraintsByWindow[tracked.key]?.nextRetryDate = nil
+                                lastSolvedTiledFrames.removeValue(forKey: tracked.key)
+                                positionChanges.append(PositionChange(window: tracked, position: frame.position))
+                                continue
+                            }
                             lastSolvedTiledFrames[tracked.key] = frame
                             expectedLayoutFrames[tracked.key] = frame
                             frameChanges.append(FrameChange(window: tracked, frame: frame))
@@ -17379,6 +17596,29 @@ final class WorkspaceEngine {
         }
         applyFrameChanges(frameChanges, correlationID: correlationID)
         applyPositionChanges(positionChanges, correlationID: correlationID)
+        for (partition, frames) in proposedTiledFrames {
+            var actualFrames: [WindowKey: WindowFrame] = [:]
+            for key in frames.keys {
+                if let tracked = windows[key], let actual = AccessibilityWindow.frame(of: tracked.element) {
+                    actualFrames[key] = actual
+                }
+            }
+            if frames.allSatisfy({ key, target in
+                actualFrames[key].map { AccessibilityWindow.framesMatch($0, target) } == true
+            }) {
+                lastAcceptedTiledFrames[partition] = frames
+            }
+            diagnostics.log(category: "layout-feedback", event: "partition-readback",
+                correlation: correlationID, fields: [
+                    "workspace": Self.shortIdentifier(partition.workspaceID.uuidString),
+                    "requested": frames.keys.sorted { Self.diagnosticWindowKey($0) < Self.diagnosticWindowKey($1) }.map {
+                        "\(Self.diagnosticWindowKey($0))=\(Self.diagnosticFrame(frames[$0]!))"
+                    }.joined(separator: "|"),
+                    "actual": actualFrames.keys.sorted { Self.diagnosticWindowKey($0) < Self.diagnosticWindowKey($1) }.map {
+                        "\(Self.diagnosticWindowKey($0))=\(Self.diagnosticFrame(actualFrames[$0]!))"
+                    }.joined(separator: "|"),
+                ])
+        }
         return expectedLayoutFrames
     }
 
@@ -17827,6 +18067,148 @@ final class WorkspaceEngine {
         }
     }
 
+    /// A rejected initial layout resize is safety evidence. Once the authoritative enumeration is
+    /// complete, an active visible ordinary window gets at most three delayed, size-only probes.
+    /// The probe uses the current frame rather than the failed layout request, never writes a
+    /// position, and only readmits after the AX endpoint has actually changed size.
+    private func attemptIneffectiveResizeOperationalRecovery(
+        displays: [DisplaySnapshot],
+        correlationID: String?
+    ) {
+        let now = Date()
+        for key in fixedSizeRecoveryStateByWindow.keys.sorted(by: {
+            ($0.processIdentifier, $0.windowIdentifier) < ($1.processIdentifier, $1.windowIdentifier)
+        }) {
+            guard var recoveryState = fixedSizeRecoveryStateByWindow[key],
+                  recoveryState.seededReason == .ineffectiveResize,
+                  recoveryState.operationalProbeCount < FixedSizeRecoveryState.operationalProbeDelays.count,
+                  recoveryState.nextOperationalProbeDate.map({ now >= $0 }) == true,
+                  let tracked = windows[key],
+                  !temporarilyDeferredWindowKeys.contains(key),
+                  fullscreenSessions[key] == nil,
+                  NSRunningApplication(processIdentifier: key.processIdentifier)?.isHidden == false,
+                  [.tiled, .accordion].contains(workspaceLayout(for: tracked.workspaceID)),
+                  shouldAttemptAccessibility(processIdentifier: key.processIdentifier, now: now)
+            else { continue }
+
+            let currentFrame = AccessibilityWindow.frame(of: tracked.element)
+            let rule = resolvedRule(for: tracked.bundleIdentifier)
+            let isVisibleActive = isWorkspaceActive(tracked.workspaceID) &&
+                !isExcludedFromWorkspaceParticipation(tracked) &&
+                !isDropDownAppWindow(key) &&
+                !rule.keepsOnAllWorkspaces &&
+                tracked.layoutOverride != .floating &&
+                !rule.excludesFromLayout &&
+                !(tracked.layoutOverride == .automatic &&
+                    rule.floatsSecondaryWindows &&
+                    tracked.admissionDecision.isSecondaryWindowCandidate) &&
+                currentFrame.map { Self.isMeaningfullyVisible($0, displays: displays) } == true
+            let coreMetadata = AccessibilityWindow.admissionMetadata(
+                of: tracked.element,
+                bundleIdentifier: tracked.bundleIdentifier,
+                windowLayer: lastKnownWindowLayer[key]
+            )
+            let refreshedMetadata = AccessibilityWindow.admissionMoveResizeCapabilityMetadata(
+                of: tracked.element,
+                coreMetadata: coreMetadata,
+                retaining: admissionMetadataByWindow[key] ?? coreMetadata
+            )
+            let probeResult = recoveryState.attemptOperationalProbe(
+                coreMetadata: coreMetadata,
+                isVisibleActive: isVisibleActive,
+                isPaused: isWindowManagementPaused,
+                isWriteAllowed: !CGEventSource.buttonState(.combinedSessionState, button: .left),
+                hasAffirmativeCapabilities: refreshedMetadata.positionSettable == .trueValue &&
+                    refreshedMetadata.sizeSettable == .trueValue &&
+                    AccessibilityWindow.admissionDecision(for: refreshedMetadata).disposition == .managedNormal,
+                currentSize: currentFrame?.size,
+                targetSize: currentFrame.flatMap { Self.operationalResizeProbeSize(for: $0.size) },
+                now: now,
+                writeSize: { AccessibilityWindow.setSizeIfNeeded($0, of: tracked.element) },
+                observeSize: { AccessibilityWindow.frame(of: tracked.element)?.size }
+            )
+            operationalResizeProbeCountByWindow[key] = recoveryState.operationalProbeCount
+
+            guard probeResult == .sizeChanged else {
+                guard probeResult != .notEligible else { continue }
+                fixedSizeRecoveryStateByWindow[key] = recoveryState
+                diagnostics.log(
+                    category: "window-admission",
+                    event: "fixed-size-operational-probe",
+                    correlation: correlationID,
+                    fields: [
+                        "window": Self.diagnosticWindowKey(key),
+                        "trial-count": String(recoveryState.operationalProbeCount),
+                        "result": recoveryState.lastOperationalProbeResult ?? "unknown",
+                        "next-trial": recoveryState.nextOperationalProbeDate.map(Self.diagnosticTimestamp) ?? "none",
+                        "position-write": "false",
+                    ]
+                )
+                continue
+            }
+
+            let postTrialCoreMetadata = AccessibilityWindow.admissionMetadata(
+                of: tracked.element,
+                bundleIdentifier: tracked.bundleIdentifier,
+                windowLayer: lastKnownWindowLayer[key]
+            )
+            let postTrialMetadata = AccessibilityWindow.admissionMoveResizeCapabilityMetadata(
+                of: tracked.element,
+                coreMetadata: postTrialCoreMetadata,
+                retaining: refreshedMetadata
+            )
+            let recoveredDecision = AccessibilityWindow.admissionDecision(for: postTrialMetadata)
+            guard postTrialMetadata.positionSettable == .trueValue,
+                  postTrialMetadata.sizeSettable == .trueValue,
+                  recoveredDecision.disposition == .managedNormal
+            else {
+                fixedSizeRecoveryStateByWindow[key] = recoveryState
+                continue
+            }
+            fixedSizeRecoveryStateByWindow.removeValue(forKey: key)
+            admissionMetadataByWindow[key] = postTrialMetadata
+            admissionDecisionByWindow[key] = recoveredDecision
+            if var updatedTracked = windows[key] {
+                updatedTracked.admissionDecision = recoveredDecision
+                windows[key] = updatedTracked
+            }
+            recordAdmissionDecision(
+                recoveredDecision,
+                metadata: postTrialMetadata,
+                key: key,
+                layerSource: "ineffective-resize-operational-recovery",
+                correlationID: correlationID
+            )
+            lastBackgroundLayoutSignature = nil
+            resizeRecoveryNeedsImmediateReflow = true
+            diagnostics.log(
+                category: "window-admission",
+                event: "fixed-size-operational-recovered",
+                correlation: correlationID,
+                fields: [
+                    "window": Self.diagnosticWindowKey(key),
+                    "trial-count": String(recoveryState.operationalProbeCount),
+                    "result": recoveryState.lastOperationalProbeResult ?? "unknown",
+                    "position-write": "false",
+                    "layout-reentry": "true",
+                ]
+            )
+        }
+    }
+
+    static func operationalResizeProbeSize(for size: CGSize) -> CGSize? {
+        guard FixedSizeRecoveryState.isValidObservedSize(size) else { return nil }
+        let minimumDimension: CGFloat = 128
+        let delta: CGFloat = 24
+        if size.width - delta >= minimumDimension {
+            return CGSize(width: size.width - delta, height: size.height)
+        }
+        if size.height - delta >= minimumDimension {
+            return CGSize(width: size.width, height: size.height - delta)
+        }
+        return nil
+    }
+
     private func applyFrameChanges(
         _ changes: [FrameChange],
         correlationID: String? = nil
@@ -17840,6 +18222,14 @@ final class WorkspaceEngine {
             )
             else { return nil }
             let current = AccessibilityWindow.frame(of: change.window.element)
+            if let state = managedResizeConstraintsByWindow[change.window.key],
+               let nextRetryDate = state.nextRetryDate, Date() < nextRetryDate,
+               let lastRequested = state.lastRequestedSize,
+               Self.sizesMatch(lastRequested, change.frame.size),
+               let actual = current?.size, let lastActual = state.lastActualSize,
+               Self.sizesMatch(actual, lastActual) {
+                return nil
+            }
             if let current, AccessibilityWindow.framesMatch(current, change.frame) {
                 diagnostics.log(
                     category: "window-frame",
@@ -17858,7 +18248,8 @@ final class WorkspaceEngine {
         for (processIdentifier, applicationChanges) in changesByApplication {
             AccessibilityWindow.withoutPositionAnimations(for: processIdentifier) {
                 for (change, current) in applicationChanges {
-                    let succeeded: Bool
+                    guard !CGEventSource.buttonState(.combinedSessionState, button: .left) else { continue }
+                    var succeeded: Bool
                     var frameWriteResult: WindowFrameWriteResult?
                     var writeMode = Self.geometryWriteMode(for: change.window.admissionDecision)
                     if writeMode == .positionOnly ||
@@ -17873,7 +18264,8 @@ final class WorkspaceEngine {
                             of: change.window.element
                         )
                         frameWriteResult = frameResult
-                        if frameResult.provesInitialResizeWasIneffective,
+                        if change.window.admissionDecision.disposition != .managedNormal,
+                           frameResult.provesInitialResizeWasIneffective,
                            let recovered = self.recoverIneffectiveResize(
                             change,
                             resizeResult: frameResult,
@@ -17887,6 +18279,11 @@ final class WorkspaceEngine {
                         } else {
                             succeeded = frameResult.succeeded
                         }
+                    }
+                    if change.window.admissionDecision.disposition == .managedNormal {
+                        let actual = AccessibilityWindow.frame(of: change.window.element)
+                        recordManagedResizeReadback(change, actual: actual, correlationID: correlationID)
+                        succeeded = actual.map { AccessibilityWindow.framesMatch($0, change.frame) } == true
                     }
                     diagnostics.log(
                         category: "window-frame",
@@ -17906,10 +18303,33 @@ final class WorkspaceEngine {
         }
     }
 
-    /// When the initial size write rejects or is confirmed to have no effect on a normal standard
-    /// window, re-probe once, classify that exact surface as fixed-size, and immediately complete
-    /// the requested move without resizing. This prevents misleading Accessibility support from
-    /// leaving an application-owned surface in a managed layout slot.
+    private func recordManagedResizeReadback(
+        _ change: FrameChange,
+        actual: WindowFrame?,
+        correlationID: String?
+    ) {
+        let now = Date()
+        var state = managedResizeConstraintsByWindow[change.window.key] ?? ManagedResizeConstraints()
+        let previousMinimum = state.minimumSize(at: now)
+        let outcome = state.observe(requested: change.frame.size, actual: actual?.size, now: now)
+        managedResizeConstraintsByWindow[change.window.key] = state
+        if state.minimumSize(at: now) != previousMinimum {
+            resizeRecoveryNeedsImmediateReflow = true
+            lastBackgroundLayoutSignature = nil
+        }
+        diagnostics.log(category: "window-frame", event: "managed-resize-readback",
+            correlation: correlationID, fields: [
+                "window": Self.diagnosticWindowKey(change.window.key),
+                "outcome": String(describing: outcome),
+                "requested": Self.diagnosticFrame(change.frame),
+                "actual": actual.map(Self.diagnosticFrame) ?? "unavailable",
+                "provisional-minimum": Self.diagnosticSize(state.minimumSize(at: now)),
+                "admission-preserved": "true",
+            ])
+    }
+
+    /// Retain normal admission on an ineffective target write. Existing dialog safety paths may
+    /// still preserve native geometry, but size constraints on normal windows feed the layout.
     private func recoverIneffectiveResize(
         _ change: FrameChange,
         resizeResult: WindowFrameWriteResult,
@@ -17918,6 +18338,13 @@ final class WorkspaceEngine {
         correlationID: String?,
         source: String
     ) -> Bool? {
+        // One refused target is not evidence that a normal window is a fixed-size dialog.
+        // Other write paths (for example wake recovery) must retain the same distinction.
+        if change.window.admissionDecision.disposition == .managedNormal {
+            recordManagedResizeReadback(change,
+                actual: AccessibilityWindow.frame(of: change.window.element), correlationID: correlationID)
+            return false
+        }
         let cached = admissionMetadataByWindow[change.window.key]
         let coreMetadata = AccessibilityWindow.admissionMetadata(
             of: change.window.element,
@@ -17947,6 +18374,7 @@ final class WorkspaceEngine {
             originalFrame: originalFrame,
             requestedFrame: change.frame,
             observedFrameAtFailure: observedFrame,
+            operationalProbeCount: operationalResizeProbeCountByWindow[change.window.key] ?? 0,
             now: now
         )
 

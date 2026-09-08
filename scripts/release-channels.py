@@ -294,6 +294,12 @@ def release_notes_path(config: dict[str, Any]) -> Path:
 
 def stage_website_payload(config: dict[str, Any], website: Path, scratch: Path) -> None:
     public = website / "public"
+    react_source = website / "src" / "App.jsx"
+    if react_source.is_file():
+        stage_react_website_sources(config, website)
+        stage_website_feed(config, website, scratch, public)
+        return
+
     index = public / "index.html"
     active = re.search(r'src="/assets/([^"?]+\.js)', index.read_text(encoding="utf-8"))
     if not active:
@@ -320,6 +326,34 @@ def stage_website_payload(config: dict[str, Any], website: Path, scratch: Path) 
     if old_bundle.name in index.read_text(encoding="utf-8"):
         raise ChannelError("Website index still points at prior active JavaScript bundle")
 
+    stage_website_feed(config, website, scratch, public)
+
+
+def previous_stable_version(appcast: Path) -> str:
+    root = ET.parse(appcast).getroot()
+    versions = [node.text.strip() for node in root.findall(".//{*}shortVersionString") if node.text and "-beta." not in node.text]
+    if not versions:
+        raise ChannelError("Website appcast has no previous Stable version")
+    return max(versions, key=lambda value: tuple(map(int, value.split("."))))
+
+
+def replace_required(path: Path, old: str, new: str, description: str) -> None:
+    contents = path.read_text(encoding="utf-8")
+    if old not in contents:
+        raise ChannelError(f"{description} has no exact previous Stable release reference")
+    path.write_text(contents.replace(old, new), encoding="utf-8")
+
+
+def stage_react_website_sources(config: dict[str, Any], website: Path) -> None:
+    old_version = previous_stable_version(website / "public" / "appcast.xml")
+    new_version = config["version"]
+    replace_required(website / "src" / "App.jsx", f"releases/tag/v{old_version}", f"releases/tag/v{new_version}", "React homepage")
+    replace_required(website / "src" / "App.jsx", f"Download {old_version}", f"Download {new_version}", "React homepage")
+    replace_required(website / "index.html", f"releases/tag/v{old_version}", f"releases/tag/v{new_version}", "Homepage JSON-LD")
+    replace_required(website / "CONTENT.md", f"Stable {old_version}", f"Stable {new_version}", "Website content")
+
+
+def stage_website_feed(config: dict[str, Any], website: Path, scratch: Path, public: Path) -> None:
     staged = scratch / "feed"
     checked([sys.executable, str(Path(config["source_repository"]) / "scripts" / "stage-release-feed.py"), "--public-directory", str(public), "--destination", str(staged)], website)
     notes = release_notes_path(config)
@@ -335,6 +369,33 @@ def stage_website_payload(config: dict[str, Any], website: Path, scratch: Path) 
     for artifact in staged.iterdir():
         if artifact.name != "appcast.xml":
             shutil.copy2(artifact, public / "updates" / artifact.name)
+
+
+def deployment_directory(website: Path) -> Path:
+    rendered = website / "dist" / "client"
+    return rendered if (rendered / "index.html").is_file() else website / "public"
+
+
+def verify_website_release_content(config: dict[str, Any], website: Path) -> None:
+    """Bind the rendered homepage and active client bundle to the release being published."""
+    deployed = deployment_directory(website)
+    index = deployed / "index.html"
+    if not index.is_file():
+        raise ChannelError(f"Website deployment has no homepage: {index}")
+    contents = index.read_text(encoding="utf-8")
+    expected_link = f"releases/tag/v{config['version']}"
+    expected_label = f"Download {config['version']}"
+    if expected_link not in contents or expected_label not in contents:
+        raise ChannelError("Rendered homepage does not contain the expected Stable release link and label")
+    active = re.search(r'src="/assets/([^"?]+\.js)', contents)
+    if not active:
+        raise ChannelError("Rendered homepage has no active JavaScript bundle")
+    bundle = deployed / "assets" / active.group(1)
+    if not bundle.is_file():
+        raise ChannelError("Rendered homepage active JavaScript bundle is missing")
+    bundle_contents = bundle.read_text(encoding="utf-8")
+    if expected_link not in bundle_contents or expected_label not in bundle_contents:
+        raise ChannelError("Rendered active JavaScript bundle does not contain the expected Stable release link and label")
 
 
 def commit_and_push(worktree: Path, message: str, remote: str = "origin") -> str:
@@ -353,7 +414,7 @@ def commit_and_push(worktree: Path, message: str, remote: str = "origin") -> str
     return head
 
 
-def validate_website_worktree(worktree: Path, expected_head: str | None = None) -> None:
+def validate_website_worktree(worktree: Path, config: dict[str, Any], expected_head: str | None = None) -> None:
     """Run the website's local gate before its content can be published or merged."""
     if expected_head is not None:
         clean(worktree)
@@ -362,6 +423,8 @@ def validate_website_worktree(worktree: Path, expected_head: str | None = None) 
     checked(["bun", "install", "--frozen-lockfile"], worktree)
     checked(["bun", "run", "lint:html"], worktree)
     checked(["bun", "run", "check"], worktree)
+    checked(["bun", "run", "test"], worktree)
+    verify_website_release_content(config, worktree)
 
 
 def named_tap_checkout(config: dict[str, Any], tap: Path) -> Path:
@@ -452,9 +515,12 @@ def website_publish(config: dict[str, Any], journal_file: Path, journal: dict[st
             write_json(journal_file, journal)
         else:
             stage_website_payload(config, worktree, scratch)
-            validate_website_worktree(worktree)
+            validate_website_worktree(worktree, config)
             locally_validated = True
-            git(worktree, "add", "public/index.html", "public/assets", "public/appcast.xml", "public/updates")
+            paths = ["public/index.html", "public/assets", "public/appcast.xml", "public/updates"]
+            if (worktree / "src" / "App.jsx").is_file():
+                paths = ["src/App.jsx", "index.html", "CONTENT.md", "public/appcast.xml", "public/updates"]
+            git(worktree, "add", *paths)
             if run(["git", "diff", "--cached", "--quiet"], worktree).returncode != 1:
                 raise ChannelError("Website staging produced no changes")
             head = commit_and_push(worktree, f"Publish WindowRanger {config['version']} update feed")
@@ -466,7 +532,7 @@ def website_publish(config: dict[str, Any], journal_file: Path, journal: dict[st
     if deployment.get("status") == "started":
         raise ChannelError("Website deployment was interrupted after it started; reconcile production before marking the journal and resuming")
     if not locally_validated:
-        validate_website_worktree(worktree, prior["head"])
+        validate_website_worktree(worktree, config, prior["head"])
     merge = wait_for_merge(website, prior["pr"], prior["head"], poll_seconds=poll_seconds, require_checks=False)
     deploy = worktrees / "website-deploy"
     if deployment.get("status") != "succeeded":
@@ -490,7 +556,8 @@ def verify_live_feeds(config: dict[str, Any], journal_file: Path, journal: dict[
     if not isinstance(urls, list) or len(urls) != 2 or any(not isinstance(url, str) or not url.startswith("https://") for url in urls):
         raise ChannelError("live_feed_urls must contain exactly two HTTPS appcast URLs")
     source = Path(config["source_repository"])
-    artifacts = worktrees / "website-deploy" / "public" / "updates"
+    deploy_root = deployment_directory(worktrees / "website-deploy")
+    artifacts = deploy_root / "updates"
     archive = release_directory(config) / f"WindowRanger-{config['version']}.zip"
     for index, url in enumerate(urls):
         checked([sys.executable, str(source / "scripts" / "verify-appcast.py"), "--feed", url,
@@ -505,16 +572,22 @@ def verify_live_feeds(config: dict[str, Any], journal_file: Path, journal: dict[
             raise ChannelError(f"Live appcast bytes differ from deployed merge commit: {url}")
         live_index = site_directory / "index.html"
         checked(["/usr/bin/curl", "--fail", "--silent", "--show-error", "--location", "--output", str(live_index), site_root + "/"], source)
-        deployed_index = worktrees / "website-deploy" / "public" / "index.html"
+        deployed_index = deploy_root / "index.html"
         if live_index.read_bytes() != deployed_index.read_bytes():
             raise ChannelError(f"Live homepage bytes differ from deployed merge commit: {site_root}")
         active = re.search(r'src="/assets/([^"?]+\.js)', live_index.read_text(encoding="utf-8"))
         if not active: raise ChannelError(f"Live homepage has no active JavaScript bundle: {site_root}")
         live_bundle = site_directory / active.group(1)
         checked(["/usr/bin/curl", "--fail", "--silent", "--show-error", "--location", "--output", str(live_bundle), site_root + "/assets/" + active.group(1)], source)
-        expected_bundle = worktrees / "website-deploy" / "public" / "assets" / active.group(1)
+        expected_bundle = deploy_root / "assets" / active.group(1)
         if not expected_bundle.is_file() or live_bundle.read_bytes() != expected_bundle.read_bytes():
             raise ChannelError(f"Live JavaScript bundle differs from deployed merge commit: {site_root}")
+        expected_link = f"releases/tag/v{config['version']}"
+        expected_label = f"Download {config['version']}"
+        if expected_link not in live_index.read_text(encoding="utf-8") or expected_label not in live_index.read_text(encoding="utf-8"):
+            raise ChannelError(f"Live homepage does not contain the expected Stable release link and label: {site_root}")
+        if expected_link not in live_bundle.read_text(encoding="utf-8") or expected_label not in live_bundle.read_text(encoding="utf-8"):
+            raise ChannelError(f"Live JavaScript bundle does not contain the expected Stable release link and label: {site_root}")
     record_step(journal_file, journal, name, urls=urls)
 
 

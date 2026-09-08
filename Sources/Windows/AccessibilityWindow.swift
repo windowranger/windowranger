@@ -1252,6 +1252,17 @@ enum AccessibilityWindow {
         return AXUIElementSetAttributeValue(element, kAXPositionAttribute as CFString, value) == .success
     }
 
+    /// An operational recovery probe must never reposition a window. Callers verify the observed
+    /// size themselves before changing admission, because an AX success result alone is not proof
+    /// that a temporarily unresponsive endpoint accepted the request.
+    @discardableResult
+    static func setSizeIfNeeded(_ target: CGSize, of element: AXUIElement) -> Bool {
+        if let current = size(of: element), sizesMatch(current, target) { return true }
+        var size = target
+        guard let value = AXValueCreate(.cgSize, &size) else { return false }
+        return AXUIElementSetAttributeValue(element, kAXSizeAttribute as CFString, value) == .success
+    }
+
     /// Suppresses the receiving application's own Accessibility transition animation for a batch
     /// of position writes, then restores its exact prior value. This is app-scoped and does not
     /// change global macOS animation or Accessibility preferences.

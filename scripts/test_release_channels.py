@@ -107,6 +107,32 @@ class ChannelTests(unittest.TestCase):
         config = dict(self.config, website_repository=str(site))
         with self.assertRaises(channels.ChannelError): channels.stage_website_payload(config, site, self.root / "scratch")
 
+    def test_react_sources_update_only_exact_previous_release_references(self):
+        site = self.root / "website"
+        (site / "src").mkdir(parents=True)
+        (site / "public").mkdir()
+        (site / "public" / "appcast.xml").write_text('<rss><channel><item><shortVersionString>1.0.8</shortVersionString></item></channel></rss>')
+        (site / "src" / "App.jsx").write_text('const url="releases/tag/v1.0.8"; const label="Download 1.0.8";')
+        (site / "index.html").write_text('{"downloadUrl":"releases/tag/v1.0.8"}')
+        (site / "CONTENT.md").write_text('Stable 1.0.8 remains current. README was checked at release tag v1.0.8.')
+        channels.stage_react_website_sources(self.config, site)
+        self.assertIn('releases/tag/v1.0.9', (site / "src" / "App.jsx").read_text())
+        self.assertIn('Download 1.0.9', (site / "src" / "App.jsx").read_text())
+        self.assertIn('releases/tag/v1.0.9', (site / "index.html").read_text())
+        content = (site / "CONTENT.md").read_text()
+        self.assertIn('Stable 1.0.9 remains current.', content)
+        self.assertIn('README was checked at release tag v1.0.8.', content)
+
+    def test_react_deployment_uses_rendered_client_output_and_verifies_release_links(self):
+        site = self.root / "website"
+        bundle = site / "dist" / "client" / "assets" / "index.js"
+        bundle.parent.mkdir(parents=True)
+        bundle.write_text('releases/tag/v1.0.9 Download 1.0.9')
+        (bundle.parents[1] / "index.html").write_text('<script src="/assets/index.js"></script> releases/tag/v1.0.9 Download 1.0.9')
+        (site / "public").mkdir()
+        self.assertEqual(channels.deployment_directory(site), site / "dist" / "client")
+        channels.verify_website_release_content(self.config, site)
+
     def test_failed_pr_check_never_requests_merge(self):
         payload = {"state": "OPEN", "headRefOid": self.sha, "statusCheckRollup": [{"conclusion": "FAILURE"}]}
         with patch.object(channels, "pr_state", return_value=payload), patch.object(channels, "checked") as checked:
@@ -168,7 +194,8 @@ class ChannelTests(unittest.TestCase):
              patch.object(channels, "commit_and_push", side_effect=lambda *_: order.append("commit-push") or self.sha), \
              patch.object(channels, "existing_pr", return_value=None), patch.object(channels, "create_pr", return_value="12"), \
              patch.object(channels, "wait_for_merge", return_value="b" * 40), patch.object(channels, "revision", return_value="b" * 40), \
-             patch.object(channels, "checked", side_effect=lambda command, *_args, **_kw: order.append("deploy" if command[:3] == ["bun", "run", "deploy"] else "command") or ""):
+             patch.object(channels, "checked", side_effect=lambda command, *_args, **_kw: order.append("deploy" if command[:3] == ["bun", "run", "deploy"] else "command") or ""), \
+             patch.object(channels, "verify_website_release_content"):
             channels.website_publish(self.config, self.root / "journal.json", journal, self.root / "worktrees", 0)
         self.assertLess(order.index("local-appcast-validation"), order.index("commit-push"))
         self.assertLess(order.index("commit-push"), order.index("deploy"))

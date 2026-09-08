@@ -287,6 +287,134 @@ enum TiledLayoutEngine {
         return result
     }
 
+    /// Returns the same BSP tree with only the split ratios adjusted enough to honour the supplied
+    /// per-window minimum sizes. The calculation is pure: it preserves leaf order, topology, and
+    /// participants, and reports an infeasible layout instead of dropping a window.
+    ///
+    /// The split choice mirrors `solve`: it selects a rounded first-child length, then derives a
+    /// ratio that makes `splitGeometry` reproduce that length. This avoids accepting a nominal
+    /// ratio whose final AX frame loses a point during layout rounding.
+    static func constrained(
+        _ tree: TiledNode,
+        in displayBounds: CGRect,
+        configuration: WorkspaceLayoutConfiguration,
+        minimumSizes: [WindowKey: CGSize]
+    ) -> TiledNode? {
+        guard displayBounds.width.isFinite, displayBounds.height.isFinite,
+              displayBounds.width > 0, displayBounds.height > 0,
+              (try? validated(tree, participants: Set(tree.windowKeys))) != nil,
+              tree.windowKeys.allSatisfy({ key in
+                  guard let size = minimumSizes[key] else { return true }
+                  return size.width.isFinite && size.height.isFinite
+              })
+        else { return nil }
+        let hasPositiveRequirement = tree.windowKeys.contains { key in
+            guard let size = minimumSizes[key] else { return false }
+            return size.width > 0 || size.height > 0
+        }
+        guard hasPositiveRequirement else { return tree }
+
+        let requirements = tree.windowKeys.reduce(into: [WindowKey: CGSize]()) { result, key in
+            let requested = minimumSizes[key] ?? .zero
+            result[key] = CGSize(
+                width: max(0, ceil(requested.width)),
+                height: max(0, ceil(requested.height))
+            )
+        }
+        let gaps = configuration.clamped().gaps
+        guard let minimum = constrainedMinimumSize(of: tree, requirements: requirements, gaps: gaps) else {
+            return nil
+        }
+        let usableBounds = inset(displayBounds, gaps: gaps)
+        guard usableBounds.width.rounded() >= minimum.width,
+              usableBounds.height.rounded() >= minimum.height
+        else { return nil }
+
+        func constrain(_ node: TiledNode, in bounds: CGRect) -> TiledNode? {
+            switch node {
+            case let .window(key):
+                guard let requirement = requirements[key],
+                      bounds.width.rounded() >= requirement.width,
+                      bounds.height.rounded() >= requirement.height
+                else { return nil }
+                return node
+            case let .split(axis, rawRatio, first, second):
+                guard let firstMinimum = constrainedMinimumSize(
+                    of: first, requirements: requirements, gaps: gaps
+                ), let secondMinimum = constrainedMinimumSize(
+                    of: second, requirements: requirements, gaps: gaps
+                ) else { return nil }
+
+                let geometry = splitGeometry(axis: axis, ratio: rawRatio, bounds: bounds, gaps: gaps)
+                let firstRequirement = axis == .horizontal ? firstMinimum.width : firstMinimum.height
+                let secondRequirement = axis == .horizontal ? secondMinimum.width : secondMinimum.height
+                let available = geometry.availableLength
+                let lower = max(
+                    ceil(firstRequirement),
+                    ceil(available * CGFloat(minimumSplitRatio)),
+                    1
+                )
+                let upper = min(
+                    floor(available - secondRequirement),
+                    floor(available * CGFloat(maximumSplitRatio))
+                )
+                guard lower <= upper else { return nil }
+
+                let desired = (available * CGFloat(min(max(rawRatio, minimumSplitRatio), maximumSplitRatio))).rounded()
+                let firstLength = min(max(desired, lower), upper)
+                guard available > 0 else { return nil }
+                let ratio = Double(firstLength / available)
+                let constrainedGeometry = splitGeometry(axis: axis, ratio: ratio, bounds: bounds, gaps: gaps)
+                guard let constrainedFirst = constrain(first, in: constrainedGeometry.first),
+                      let constrainedSecond = constrain(second, in: constrainedGeometry.second)
+                else { return nil }
+                return .split(
+                    axis: axis,
+                    ratio: ratio,
+                    first: constrainedFirst,
+                    second: constrainedSecond
+                )
+            }
+        }
+
+        return constrain(tree, in: usableBounds)
+    }
+
+    /// Reuses a previously accepted frame set only when it still describes every current
+    /// participant inside the current bounds and satisfies the currently learned minima.
+    static func reusableAcceptedFrames(
+        _ frames: [WindowKey: WindowFrame]?,
+        participants: Set<WindowKey>,
+        in bounds: CGRect,
+        minimumSizes: [WindowKey: CGSize]
+    ) -> [WindowKey: WindowFrame]? {
+        guard let frames,
+              bounds.minX.isFinite, bounds.minY.isFinite,
+              bounds.width.isFinite, bounds.height.isFinite,
+              bounds.width > 0, bounds.height > 0,
+              Set(frames.keys) == participants
+        else { return nil }
+
+        for key in participants {
+            guard let frame = frames[key],
+                  frame.position.x.isFinite, frame.position.y.isFinite,
+                  frame.size.width.isFinite, frame.size.height.isFinite,
+                  frame.size.width > 0, frame.size.height > 0,
+                  frame.position.x >= bounds.minX,
+                  frame.position.y >= bounds.minY,
+                  frame.position.x + frame.size.width <= bounds.maxX,
+                  frame.position.y + frame.size.height <= bounds.maxY
+            else { return nil }
+            if let minimum = minimumSizes[key] {
+                guard minimum.width.isFinite, minimum.height.isFinite,
+                      frame.size.width >= max(0, ceil(minimum.width)),
+                      frame.size.height >= max(0, ceil(minimum.height))
+                else { return nil }
+            }
+        }
+        return frames
+    }
+
     static func accommodatesMinimumWindowLength(
         _ frames: [WindowKey: WindowFrame],
         minimumWindowLength: CGFloat = 120
@@ -1117,6 +1245,65 @@ enum TiledLayoutEngine {
             try validateRatios(in: first)
             try validateRatios(in: second)
         }
+    }
+
+    /// The smallest rounded rectangle that can satisfy this subtree while keeping every split
+    /// within the same 10–90% bounds used by `splitGeometry`.
+    private static func constrainedMinimumSize(
+        of node: TiledNode,
+        requirements: [WindowKey: CGSize],
+        gaps: WorkspaceLayoutGaps
+    ) -> CGSize? {
+        switch node {
+        case let .window(key):
+            guard let requirement = requirements[key] else { return nil }
+            return CGSize(width: max(1, requirement.width), height: max(1, requirement.height))
+        case let .split(axis, _, first, second):
+            guard let firstMinimum = constrainedMinimumSize(of: first, requirements: requirements, gaps: gaps),
+                  let secondMinimum = constrainedMinimumSize(of: second, requirements: requirements, gaps: gaps)
+            else { return nil }
+            switch axis {
+            case .horizontal:
+                guard let available = minimumConstrainedSplitLength(
+                    first: firstMinimum.width,
+                    second: secondMinimum.width
+                ) else { return nil }
+                let width = available + CGFloat(gaps.innerHorizontal)
+                guard width.isFinite else { return nil }
+                return CGSize(width: width, height: max(firstMinimum.height, secondMinimum.height))
+            case .vertical:
+                guard let available = minimumConstrainedSplitLength(
+                    first: firstMinimum.height,
+                    second: secondMinimum.height
+                ) else { return nil }
+                let height = available + CGFloat(gaps.innerVertical)
+                guard height.isFinite else { return nil }
+                return CGSize(width: max(firstMinimum.width, secondMinimum.width), height: height)
+            }
+        }
+    }
+
+    /// `splitGeometry` rounds the first child to an integral point. Find the smallest integral
+    /// available length that still permits both required child lengths and a 10–90% split.
+    private static func minimumConstrainedSplitLength(first: CGFloat, second: CGFloat) -> CGFloat? {
+        guard first.isFinite, second.isFinite, first >= 1, second >= 1 else { return nil }
+        var available = max(
+            2,
+            ceil(first + second),
+            ceil(first / CGFloat(maximumSplitRatio)),
+            ceil(second / CGFloat(maximumSplitRatio))
+        )
+        guard available.isFinite else { return nil }
+        for _ in 0..<4 {
+            let lower = max(ceil(first), ceil(available * CGFloat(minimumSplitRatio)), 1)
+            let upper = min(
+                floor(available - second),
+                floor(available * CGFloat(maximumSplitRatio))
+            )
+            if lower <= upper { return available }
+            available += 1
+        }
+        return nil
     }
 
     private static func solve(
