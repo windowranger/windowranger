@@ -114,29 +114,53 @@ enum AXBooleanAttributeObservation: String, Equatable, Sendable {
 enum WindowFrameWriteResult: Equatable, Sendable {
     case succeeded
     case succeededAfterInitialSizeRetry
+    case succeededAfterGrowthRepositionFallback
     case valueCreationFailed
     case initialSizeRejected
     case initialSizeWriteIgnored
     case positionRejected
     case finalSizeRejected
+    case growthRepositionFallbackIneligible
+    case growthRepositionFallbackPositionRejected
+    case growthRepositionFallbackSizeRejected
+    case growthRepositionFallbackReadbackMismatch
+    case growthRepositionFallbackRollbackFailed
 
     var provesInitialResizeWasIneffective: Bool {
-        self == .initialSizeRejected || self == .initialSizeWriteIgnored
+        switch self {
+        case .initialSizeRejected,
+             .initialSizeWriteIgnored,
+             .growthRepositionFallbackPositionRejected,
+             .growthRepositionFallbackSizeRejected,
+             .growthRepositionFallbackReadbackMismatch,
+             .growthRepositionFallbackRollbackFailed:
+            true
+        default:
+            false
+        }
     }
 
     var succeeded: Bool {
-        self == .succeeded || self == .succeededAfterInitialSizeRetry
+        self == .succeeded ||
+            self == .succeededAfterInitialSizeRetry ||
+            self == .succeededAfterGrowthRepositionFallback
     }
 
     var diagnosticValue: String {
         switch self {
         case .succeeded: "succeeded"
         case .succeededAfterInitialSizeRetry: "initial-size-retry-succeeded"
+        case .succeededAfterGrowthRepositionFallback: "growth-reposition-fallback-succeeded"
         case .valueCreationFailed: "value-creation-failed"
         case .initialSizeRejected: "initial-size-rejected"
         case .initialSizeWriteIgnored: "initial-size-write-ignored"
         case .positionRejected: "position-rejected"
         case .finalSizeRejected: "final-size-rejected"
+        case .growthRepositionFallbackIneligible: "growth-reposition-fallback-ineligible"
+        case .growthRepositionFallbackPositionRejected: "growth-reposition-fallback-position-rejected"
+        case .growthRepositionFallbackSizeRejected: "growth-reposition-fallback-size-rejected"
+        case .growthRepositionFallbackReadbackMismatch: "growth-reposition-fallback-readback-mismatch"
+        case .growthRepositionFallbackRollbackFailed: "growth-reposition-fallback-rollback-failed"
         }
     }
 }
@@ -1291,7 +1315,8 @@ enum AccessibilityWindow {
 
     static func setFrameResult(
         _ frame: WindowFrame,
-        of element: AXUIElement
+        of element: AXUIElement,
+        allowGrowthReposition: Bool = false
     ) -> WindowFrameWriteResult {
         let current = self.frame(of: element)
         if let current, framesMatch(current, frame) {
@@ -1311,7 +1336,7 @@ enum AccessibilityWindow {
                 sizeValue
             ) == .success
         }
-        return applyFrameWriteSequenceResult(
+        let result = applyFrameWriteSequenceResult(
             writeSize: {
                 writeSize()
             },
@@ -1336,6 +1361,185 @@ enum AccessibilityWindow {
                 )
             }
         )
+        guard shouldAttemptGrowthRepositionFallback(
+            allowGrowthReposition: allowGrowthReposition,
+            initialResult: result
+        ),
+              let current,
+              let fallbackOriginalFrame = self.frame(of: element),
+              framesMatch(fallbackOriginalFrame, current),
+              !CGEventSource.buttonState(.combinedSessionState, button: .left),
+              canUseGrowthRepositionFallback(from: fallbackOriginalFrame, to: frame)
+        else { return result }
+
+        return applyGrowthRepositionFallback(
+            originalFrame: fallbackOriginalFrame,
+            targetFrame: frame,
+            writeSize: { size in
+                var size = size
+                guard let value = AXValueCreate(.cgSize, &size) else { return false }
+                return AXUIElementSetAttributeValue(element, kAXSizeAttribute as CFString, value) == .success
+            },
+            writePosition: { position in
+                var position = position
+                guard let value = AXValueCreate(.cgPoint, &position) else { return false }
+                return AXUIElementSetAttributeValue(element, kAXPositionAttribute as CFString, value) == .success
+            },
+            observeFrame: { self.frame(of: element) },
+            pause: { Thread.sleep(forTimeInterval: 0.02) }
+        )
+    }
+
+    static func shouldAttemptGrowthRepositionFallback(
+        allowGrowthReposition: Bool,
+        initialResult: WindowFrameWriteResult
+    ) -> Bool {
+        allowGrowthReposition && initialResult == .initialSizeWriteIgnored
+    }
+
+    /// Some windows ignore an edge-constrained growth request until they are moved inward. This
+    /// opt-in retry is deliberately narrower than the normal size-position-size sequence: it only
+    /// permits growth whose requested far edges remain within the original far edges, then verifies
+    /// the complete resulting frame and restores the original frame on every failed attempt.
+    static func canUseGrowthRepositionFallback(
+        from originalFrame: WindowFrame,
+        to targetFrame: WindowFrame,
+        tolerance: CGFloat = 1
+    ) -> Bool {
+        let values = [
+            originalFrame.position.x, originalFrame.position.y,
+            originalFrame.size.width, originalFrame.size.height,
+            targetFrame.position.x, targetFrame.position.y,
+            targetFrame.size.width, targetFrame.size.height,
+        ]
+        guard values.allSatisfy(\.isFinite),
+              originalFrame.size.width > 0,
+              originalFrame.size.height > 0,
+              targetFrame.size.width > 0,
+              targetFrame.size.height > 0,
+              targetFrame.size.width >= originalFrame.size.width,
+              targetFrame.size.height >= originalFrame.size.height
+        else { return false }
+
+        let growsHorizontally = targetFrame.size.width > originalFrame.size.width + tolerance
+        let growsVertically = targetFrame.size.height > originalFrame.size.height + tolerance
+        guard growsHorizontally || growsVertically else { return false }
+
+        let originalRight = originalFrame.position.x + originalFrame.size.width
+        let originalBottom = originalFrame.position.y + originalFrame.size.height
+        let targetRight = targetFrame.position.x + targetFrame.size.width
+        let targetBottom = targetFrame.position.y + targetFrame.size.height
+        guard originalRight.isFinite,
+              originalBottom.isFinite,
+              targetRight.isFinite,
+              targetBottom.isFinite,
+              targetRight <= originalRight + tolerance,
+              targetBottom <= originalBottom + tolerance
+        else { return false }
+
+        if growsHorizontally {
+            guard targetFrame.position.x < originalFrame.position.x - tolerance
+            else { return false }
+        }
+        if growsVertically {
+            guard targetFrame.position.y < originalFrame.position.y - tolerance
+            else { return false }
+        }
+        return true
+    }
+
+    static func applyGrowthRepositionFallback(
+        originalFrame: WindowFrame,
+        targetFrame: WindowFrame,
+        writeSize: (CGSize) -> Bool,
+        writePosition: (CGPoint) -> Bool,
+        observeFrame: () -> WindowFrame?,
+        pause: () -> Void = {}
+    ) -> WindowFrameWriteResult {
+        guard canUseGrowthRepositionFallback(from: originalFrame, to: targetFrame) else {
+            return .growthRepositionFallbackIneligible
+        }
+        guard writePosition(targetFrame.position) else {
+            return growthRepositionFallbackFailure(
+                .growthRepositionFallbackPositionRejected,
+                originalFrame: originalFrame,
+                writeSize: writeSize,
+                writePosition: writePosition,
+                observeFrame: observeFrame,
+                pause: pause
+            )
+        }
+        guard writeSize(targetFrame.size) else {
+            return growthRepositionFallbackFailure(
+                .growthRepositionFallbackSizeRejected,
+                originalFrame: originalFrame,
+                writeSize: writeSize,
+                writePosition: writePosition,
+                observeFrame: observeFrame,
+                pause: pause
+            )
+        }
+        guard frameEventuallyMatches(targetFrame, observeFrame: observeFrame, pause: pause) else {
+            return growthRepositionFallbackFailure(
+                .growthRepositionFallbackReadbackMismatch,
+                originalFrame: originalFrame,
+                writeSize: writeSize,
+                writePosition: writePosition,
+                observeFrame: observeFrame,
+                pause: pause
+            )
+        }
+        return .succeededAfterGrowthRepositionFallback
+    }
+
+    private static func growthRepositionFallbackFailure(
+        _ failure: WindowFrameWriteResult,
+        originalFrame: WindowFrame,
+        writeSize: (CGSize) -> Bool,
+        writePosition: (CGPoint) -> Bool,
+        observeFrame: () -> WindowFrame?,
+        pause: () -> Void
+    ) -> WindowFrameWriteResult {
+        guard rollbackFrame(
+            originalFrame,
+            writeSize: writeSize,
+            writePosition: writePosition,
+            observeFrame: observeFrame,
+            pause: pause
+        ) else { return .growthRepositionFallbackRollbackFailed }
+        return failure
+    }
+
+    private static func rollbackFrame(
+        _ originalFrame: WindowFrame,
+        writeSize: (CGSize) -> Bool,
+        writePosition: (CGPoint) -> Bool,
+        observeFrame: () -> WindowFrame?,
+        pause: () -> Void
+    ) -> Bool {
+        if let observedFrame = observeFrame(), framesMatch(observedFrame, originalFrame) {
+            return true
+        }
+        _ = writeSize(originalFrame.size)
+        _ = writePosition(originalFrame.position)
+        _ = writeSize(originalFrame.size)
+        return frameEventuallyMatches(originalFrame, observeFrame: observeFrame, pause: pause)
+    }
+
+    private static func frameEventuallyMatches(
+        _ targetFrame: WindowFrame,
+        observeFrame: () -> WindowFrame?,
+        pause: () -> Void
+    ) -> Bool {
+        for attempt in 0...ignoredSizeWriteVerificationPollCount {
+            if let observedFrame = observeFrame(), framesMatch(observedFrame, targetFrame) {
+                return true
+            }
+            if attempt < ignoredSizeWriteVerificationPollCount {
+                pause()
+            }
+        }
+        return false
     }
 
     /// Size-position-size is the most reliable sequence for apps that clamp one dimension after
