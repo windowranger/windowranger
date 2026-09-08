@@ -3155,7 +3155,7 @@ final class WorkspaceDefinitionTests: XCTestCase {
         XCTAssertEqual(operations, ["size", "retry"])
     }
 
-    func testFrameWriteResultMarksOnlyInitialResizeFailuresAsOperationalEvidence() {
+    func testFrameWriteResultPreservesInitialResizeFailureEvidenceThroughFallback() {
         XCTAssertTrue(WindowFrameWriteResult.initialSizeRejected.provesInitialResizeWasIneffective)
         XCTAssertTrue(WindowFrameWriteResult.initialSizeWriteIgnored.provesInitialResizeWasIneffective)
         XCTAssertFalse(WindowFrameWriteResult.succeeded.provesInitialResizeWasIneffective)
@@ -3164,8 +3164,261 @@ final class WorkspaceDefinitionTests: XCTestCase {
         )
         XCTAssertFalse(WindowFrameWriteResult.positionRejected.provesInitialResizeWasIneffective)
         XCTAssertFalse(WindowFrameWriteResult.finalSizeRejected.provesInitialResizeWasIneffective)
+        XCTAssertTrue(
+            WindowFrameWriteResult.growthRepositionFallbackReadbackMismatch.provesInitialResizeWasIneffective
+        )
+        XCTAssertTrue(
+            WindowFrameWriteResult.growthRepositionFallbackRollbackFailed.provesInitialResizeWasIneffective
+        )
+        XCTAssertFalse(
+            WindowFrameWriteResult.succeededAfterGrowthRepositionFallback.provesInitialResizeWasIneffective
+        )
         XCTAssertTrue(WindowFrameWriteResult.succeeded.succeeded)
         XCTAssertTrue(WindowFrameWriteResult.succeededAfterInitialSizeRetry.succeeded)
+        XCTAssertTrue(WindowFrameWriteResult.succeededAfterGrowthRepositionFallback.succeeded)
+    }
+
+    func testGrowthRepositionFallbackEligibilityIsBoundedToInwardGrowth() {
+        let capturedOriginal = WindowFrame(
+            position: CGPoint(x: 2_473, y: 30),
+            size: CGSize(width: 1_367, height: 1_531)
+        )
+        let capturedTarget = WindowFrame(
+            position: CGPoint(x: 2_423, y: 30),
+            size: CGSize(width: 1_417, height: 1_531)
+        )
+
+        XCTAssertTrue(AccessibilityWindow.canUseGrowthRepositionFallback(
+            from: capturedOriginal,
+            to: capturedTarget
+        ))
+        XCTAssertFalse(AccessibilityWindow.canUseGrowthRepositionFallback(
+            from: capturedOriginal,
+            to: WindowFrame(position: capturedOriginal.position, size: capturedTarget.size)
+        ), "Growth without an inward move must retain the normal guarded behavior")
+        XCTAssertFalse(AccessibilityWindow.canUseGrowthRepositionFallback(
+            from: capturedOriginal,
+            to: WindowFrame(position: capturedTarget.position, size: CGSize(width: 1_300, height: 1_531))
+        ), "A shrinking axis is never eligible")
+        XCTAssertFalse(AccessibilityWindow.canUseGrowthRepositionFallback(
+            from: capturedOriginal,
+            to: WindowFrame(position: CGPoint(x: 2_474, y: 30), size: capturedTarget.size)
+        ), "An outward growth move is never eligible")
+        XCTAssertFalse(AccessibilityWindow.canUseGrowthRepositionFallback(
+            from: capturedOriginal,
+            to: WindowFrame(position: CGPoint(x: 2_423, y: 35), size: capturedTarget.size)
+        ), "An unchanged axis may not move its far edge outward")
+
+        let negativeOriginal = WindowFrame(
+            position: CGPoint(x: -100, y: -40),
+            size: CGSize(width: 500, height: 400)
+        )
+        XCTAssertTrue(AccessibilityWindow.canUseGrowthRepositionFallback(
+            from: negativeOriginal,
+            to: WindowFrame(position: CGPoint(x: -100, y: -70), size: CGSize(width: 500, height: 430))
+        ), "Vertical inward growth must support negative display coordinates")
+        XCTAssertFalse(AccessibilityWindow.canUseGrowthRepositionFallback(
+            from: WindowFrame(position: CGPoint(x: CGFloat.nan, y: 0), size: CGSize(width: 500, height: 400)),
+            to: WindowFrame(position: CGPoint(x: -30, y: 0), size: CGSize(width: 530, height: 400))
+        ))
+        XCTAssertFalse(AccessibilityWindow.canUseGrowthRepositionFallback(
+            from: WindowFrame(position: CGPoint(x: 0, y: 0), size: CGSize(width: CGFloat.infinity, height: 400)),
+            to: WindowFrame(position: CGPoint(x: -30, y: 0), size: CGSize(width: 530, height: 400))
+        ))
+
+        var attemptedWrite = false
+        XCTAssertEqual(
+            AccessibilityWindow.applyGrowthRepositionFallback(
+                originalFrame: capturedOriginal,
+                targetFrame: WindowFrame(position: capturedOriginal.position, size: capturedTarget.size),
+                writeSize: { _ in attemptedWrite = true; return true },
+                writePosition: { _ in attemptedWrite = true; return true },
+                observeFrame: { capturedOriginal }
+            ),
+            .growthRepositionFallbackIneligible
+        )
+        XCTAssertFalse(attemptedWrite)
+    }
+
+    func testGrowthRepositionFallbackPolicyRequiresConfirmedIgnoredInitialSizeWrite() {
+        XCTAssertFalse(AccessibilityWindow.shouldAttemptGrowthRepositionFallback(
+            allowGrowthReposition: false,
+            initialResult: .initialSizeWriteIgnored
+        ))
+        XCTAssertFalse(AccessibilityWindow.shouldAttemptGrowthRepositionFallback(
+            allowGrowthReposition: true,
+            initialResult: .initialSizeRejected
+        ), "A rejected retry must retain the no-position safety boundary")
+        XCTAssertFalse(AccessibilityWindow.shouldAttemptGrowthRepositionFallback(
+            allowGrowthReposition: true,
+            initialResult: .succeeded
+        ))
+        XCTAssertFalse(AccessibilityWindow.shouldAttemptGrowthRepositionFallback(
+            allowGrowthReposition: true,
+            initialResult: .succeededAfterInitialSizeRetry
+        ))
+        XCTAssertTrue(AccessibilityWindow.shouldAttemptGrowthRepositionFallback(
+            allowGrowthReposition: true,
+            initialResult: .initialSizeWriteIgnored
+        ))
+    }
+
+    func testGrowthRepositionFallbackSucceedsForCapturedEdgeClampAfterDefaultSequenceStops() {
+        let original = WindowFrame(
+            position: CGPoint(x: 2_473, y: 30),
+            size: CGSize(width: 1_367, height: 1_531)
+        )
+        let target = WindowFrame(
+            position: CGPoint(x: 2_423, y: 30),
+            size: CGSize(width: 1_417, height: 1_531)
+        )
+        var defaultOperations: [String] = []
+        XCTAssertEqual(
+            AccessibilityWindow.applyFrameWriteSequenceResult(
+                writeSize: { defaultOperations.append("size"); return true },
+                writePosition: { defaultOperations.append("position"); return true },
+                initialSizeWriteWasIgnored: { defaultOperations.append("verify"); return true }
+            ),
+            .initialSizeWriteIgnored
+        )
+        XCTAssertEqual(defaultOperations, ["size", "verify"], "The default path must not reposition")
+
+        var actual = original
+        var operations: [String] = []
+        let result = AccessibilityWindow.applyGrowthRepositionFallback(
+            originalFrame: original,
+            targetFrame: target,
+            writeSize: { size in
+                operations.append("size")
+                if size == target.size && actual.position == original.position {
+                    return true // Simulated screen-edge clamp: accepted but ignored before moving inward.
+                }
+                actual.size = size
+                return true
+            },
+            writePosition: { position in
+                operations.append("position")
+                actual.position = position
+                return true
+            },
+            observeFrame: { actual }
+        )
+
+        XCTAssertEqual(result, .succeededAfterGrowthRepositionFallback)
+        XCTAssertTrue(result.succeeded)
+        XCTAssertEqual(operations, ["position", "size"])
+        XCTAssertEqual(actual, target)
+
+        var delayedReadbacks = [
+            WindowFrame(position: target.position, size: original.size),
+            target,
+        ]
+        var pauseCount = 0
+        XCTAssertEqual(
+            AccessibilityWindow.applyGrowthRepositionFallback(
+                originalFrame: original,
+                targetFrame: target,
+                writeSize: { _ in true },
+                writePosition: { _ in true },
+                observeFrame: { delayedReadbacks.removeFirst() },
+                pause: { pauseCount += 1 }
+            ),
+            .succeededAfterGrowthRepositionFallback
+        )
+        XCTAssertEqual(pauseCount, 1, "A delayed accepted size write must settle before rollback")
+    }
+
+    func testGrowthRepositionFallbackRejectsOrIgnoresWritesAndRollsBack() {
+        let original = WindowFrame(position: CGPoint(x: 100, y: 100), size: CGSize(width: 400, height: 300))
+        let target = WindowFrame(position: CGPoint(x: 50, y: 100), size: CGSize(width: 450, height: 300))
+
+        var positionRejected = original
+        XCTAssertEqual(
+            AccessibilityWindow.applyGrowthRepositionFallback(
+                originalFrame: original,
+                targetFrame: target,
+                writeSize: { positionRejected.size = $0; return true },
+                writePosition: { _ in false },
+                observeFrame: { positionRejected }
+            ),
+            .growthRepositionFallbackPositionRejected
+        )
+        XCTAssertEqual(positionRejected, original)
+
+        var sizeRejected = original
+        XCTAssertEqual(
+            AccessibilityWindow.applyGrowthRepositionFallback(
+                originalFrame: original,
+                targetFrame: target,
+                writeSize: { size in
+                    guard size != target.size else { return false }
+                    sizeRejected.size = size
+                    return true
+                },
+                writePosition: { position in sizeRejected.position = position; return true },
+                observeFrame: { sizeRejected }
+            ),
+            .growthRepositionFallbackSizeRejected
+        )
+        XCTAssertEqual(sizeRejected, original)
+
+        var ignoredSize = original
+        XCTAssertEqual(
+            AccessibilityWindow.applyGrowthRepositionFallback(
+                originalFrame: original,
+                targetFrame: target,
+                writeSize: { size in
+                    guard size != target.size else { return true }
+                    ignoredSize.size = size
+                    return true
+                },
+                writePosition: { position in ignoredSize.position = position; return true },
+                observeFrame: { ignoredSize }
+            ),
+            .growthRepositionFallbackReadbackMismatch
+        )
+        XCTAssertEqual(ignoredSize, original)
+
+        var partiallyAppliedSize = original
+        XCTAssertEqual(
+            AccessibilityWindow.applyGrowthRepositionFallback(
+                originalFrame: original,
+                targetFrame: target,
+                writeSize: { size in
+                    if size == target.size {
+                        partiallyAppliedSize.size = CGSize(width: 425, height: size.height)
+                    } else {
+                        partiallyAppliedSize.size = size
+                    }
+                    return true
+                },
+                writePosition: { position in partiallyAppliedSize.position = position; return true },
+                observeFrame: { partiallyAppliedSize }
+            ),
+            .growthRepositionFallbackReadbackMismatch
+        )
+        XCTAssertEqual(partiallyAppliedSize, original)
+    }
+
+    func testGrowthRepositionFallbackReportsRollbackFailureWithoutFalseSuccess() {
+        let original = WindowFrame(position: CGPoint(x: 100, y: 100), size: CGSize(width: 400, height: 300))
+        let target = WindowFrame(position: CGPoint(x: 50, y: 100), size: CGSize(width: 450, height: 300))
+        var actual = original
+
+        let result = AccessibilityWindow.applyGrowthRepositionFallback(
+            originalFrame: original,
+            targetFrame: target,
+            writeSize: { _ in false },
+            writePosition: { position in
+                if position == target.position { actual.position = position; return true }
+                return false
+            },
+            observeFrame: { actual }
+        )
+
+        XCTAssertEqual(result, .growthRepositionFallbackRollbackFailed)
+        XCTAssertFalse(result.succeeded)
+        XCTAssertEqual(actual.position, target.position)
     }
 
     func testOnePointSizeRoundingDoesNotClassifyOrdinaryWindowAsFixedSize() {

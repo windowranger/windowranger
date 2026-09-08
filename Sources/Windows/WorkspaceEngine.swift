@@ -2231,6 +2231,7 @@ final class WorkspaceEngine {
     private struct FrameChange {
         let window: TrackedWindow
         let frame: WindowFrame
+        var allowsGrowthReposition = false
     }
 
     private struct TiledPlacementCommitContext {
@@ -7653,6 +7654,10 @@ final class WorkspaceEngine {
         default:
             .frame
         }
+    }
+
+    static func allowsTiledGrowthReposition(for decision: WindowAdmissionDecision) -> Bool {
+        decision.disposition == .managedNormal && decision.reason == .normalWindow
     }
 
     static func displayModeForWindowPlacement(
@@ -17562,7 +17567,11 @@ final class WorkspaceEngine {
                             }
                             lastSolvedTiledFrames[tracked.key] = frame
                             expectedLayoutFrames[tracked.key] = frame
-                            frameChanges.append(FrameChange(window: tracked, frame: frame))
+                            frameChanges.append(FrameChange(
+                                window: tracked,
+                                frame: frame,
+                                allowsGrowthReposition: Self.allowsTiledGrowthReposition(for: tracked.admissionDecision)
+                            ))
                         }
                     }
                 } else {
@@ -18261,7 +18270,9 @@ final class WorkspaceEngine {
                     } else {
                         let frameResult = AccessibilityWindow.setFrameResult(
                             change.frame,
-                            of: change.window.element
+                            of: change.window.element,
+                            allowGrowthReposition: change.allowsGrowthReposition &&
+                                Self.allowsTiledGrowthReposition(for: change.window.admissionDecision)
                         )
                         frameWriteResult = frameResult
                         if change.window.admissionDecision.disposition != .managedNormal,
