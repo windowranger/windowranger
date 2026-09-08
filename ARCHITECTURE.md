@@ -170,28 +170,50 @@ capability evidence remains managed conservatively and does not trigger this fal
 negative probe is retained so the ordinary engine refresh does not repeat failed support reads.
 Proven fixed-size windows use position-only writes for visibility, display reconciliation, Quick App
 transitions, and quit recovery; neither an explicit per-window override nor another frame path can
-force a resize-first operation. If the one-time probe was inconclusive or misleading but an initial
-size write later rejects twice, or reports success while repeated readbacks across one retry and a
-bounded quarter-second observation window confirm the size remained unchanged, the engine re-probes
-that exact candidate once, records the
-fixed-size decision, and re-solves affected visible layouts. One initial rejection receives a
-bounded retry and remains normal when that retry succeeds. The confirmation runs before any
-position write. A currently visible no-op surface keeps its existing position; a parked surface or
-an explicit Quick App/quit-recovery transition completes with a position-only move. Unavailable,
-delayed, clamped, or partial readback changes do not promote a normal window. Position or final-size
-failures likewise do not promote it into this safety classification.
-An unchanged successful size request must differ from the original size by more than one point
-in at least one dimension before it can prove fixed-size behavior. An app may round or clamp a
-one-point request; that small discrepancy still permits placement and does not evict its layout
-slot. This does not relax an explicit negative capability probe or repeated rejected writes.
+force a resize-first operation. An ignored or rejected frame write on a normally admitted window
+does not change its admission. The size-position-size setter still stops before moving a window
+whose initial size write was ineffective, but the result now feeds managed resize constraints.
+Fresh readback separates applied, constrained, deferred and unavailable sizes. An actual dimension
+larger than the requested one becomes a provisional per-window minimum for 30 seconds; observing
+a smaller size invalidates that bound. A refused growth request does not invent a minimum.
+These bounds are conservative observations, not claims that the app has a permanent minimum.
+Unsettled requests schedule at most three retries, after 1, 2 and 5 seconds, while preserving
+membership. A new target or successful readback resets that budget; ordinary external changes and
+explicit workspace commands can still trigger layout after the automatic budget ends.
+Tiled layout recursively aggregates these minimum dimensions and gaps through the split tree,
+then clamps ratios to feasible allocations using the same pixel rounding as frame generation.
+For a 3840-point display with a 5-point gap, a right-hand 600-point minimum leaves the other
+window 3235 points. Impossible partitions never drop a participant: a still-valid last accepted
+layout is reused, otherwise current sizes are preserved with position-only on-screen recovery.
+The latter fallback stops automatic retries until new geometry/constraints cause reconciliation.
+Only a complete matching readback records a layout as accepted. Frame outcomes and whole-partition
+requested/actual frames share a correlation, including background layout, for support reports.
 Fixed-size admission retains the observed size at classification as a recovery baseline. If that
 exact window later changes size while visible on an active workspace, discovery can recheck its
 move/resize capabilities. Only fresh affirmative evidence for both capabilities releases the
 fixed-size fallback and restores ordinary layout evaluation. An unchanged size never triggers this
-probe, even when cached AX capabilities claim writability; this preserves the ineffective-write
-protection above. Failed or negative probes retain the baseline and safety classification, with
+probe, even when cached AX capabilities claim writability. Failed or negative probes retain the baseline and safety classification, with
 retries bounded to at most once per five seconds through the existing discovery pass. Hidden,
 inactive, minimized, fullscreen, and non-normal surfaces do not trigger recovery probes.
+The earlier WR-123 operational recovery path remains for legacy ineffective-resize classifications;
+normally admitted windows no longer enter that path after a failed target write. A writable,
+stable discovery pass can attempt a size-only probe after delays of 5, then 15, then 45 seconds.
+The target is a 24-point shrink from the fresh current size, never the stale failed layout target;
+it does not shrink a dimension below 128 points or perform a position write. Fresh affirmative
+capabilities allow a trial, but only a successful write with a finite positive observed size change
+greater than one point, followed by fresh normal admission metadata, permits layout reentry.
+The next ordinary layout solve computes the current placement. Hidden, Freeform, inactive,
+excluded, deferred, fullscreen, paused, startup, wake/topology-transition and pointer/manual-gesture
+states prevent trials. Cooldown and exhausted states skip trial AX reads. A fresh pointer check
+also prevents immediate reflow if a drag begins during the trial.
+The three-trial budget survives recovery and repeated demotion of the same window, preventing
+oscillation; it is removed with the window's discovery state. An exhausted window still has the
+existing observed-size-change recovery path. Initial-capability classifications never receive
+operational probes. Deterministic tests cover the captured no-op sequences, delayed operational
+response, misleading writable flags, exhaustion and write suppression; installed recurrence and
+native gesture interleaving remain separate live-validation requirements.
+The shared `frame-application` diagnostic source does not distinguish native resize completion
+from background layout writes; the live triggering interleaving remains unproven.
 An otherwise closeless standard window on an unknown or normal layer receives a separate one-time
 dialog-control probe only when both its Full Screen and Close controls are authoritatively absent.
 Affirmative window-level Default and Cancel button relationships classify that surface as a managed
@@ -573,7 +595,14 @@ its panel, focus, input, timing, or accessibility boundary.
 
 Manual Tiled divider resize and title-bar move use two-phase preview transactions. A passive global
 mouse monitor asks the serialized engine for the focused-window frame only until a genuine size or
-position change classifies the gesture. The engine then freezes the committed tree, captures every
+position change classifies the gesture.
+Resize-shaped geometry with stationary non-dragged edges is not classified as a move when the
+separately sampled pointer misses the changed edge. Such samples remain unclaimed until the
+pointer agrees or post-release native-resize reconciliation adopts the observed divider. This
+avoids entering a move cancellation that restores the pre-resize frame. Translated title-bar moves
+with small size noise retain move recognition. This guard has deterministic coverage; the reported
+native left-edge gesture still requires installed-app validation.
+The engine then freezes the committed tree, captures every
 participant's exact original frame, and parks only those windows at the recoverable desktop edge.
 Resize sessions also retain the dragged edge and pointer anchor; subsequent samples at a bounded
 30 Hz project an observed frame from the pointer rather than the concealed AX window. Move sessions

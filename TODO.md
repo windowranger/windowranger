@@ -3858,6 +3858,16 @@ smallest useful outcome and acceptance boundary.
 
 ## Live validation
 
+### WR-131 — Release WindowRanger 1.0.10
+
+- **Status:** Release in progress; explicitly authorized by the maintainer.
+- **Scope:** Publish the WR-123 minimum-size tiling correction as Stable 1.0.10/build 23,
+  with immutable signed/notarized artifacts, exact-package verification, feed/site and tap updates.
+- **Acceptance evidence:** Maintainer reported the edge-double-click failure fixed in the installed
+  structural candidate. Its exact source passed all 957 non-hosted tests. Broader resume
+  recurrence monitoring remains open under WR-123.
+- **Remaining:** Source promotion, exact-release gates, packaged-app verification and publication.
+
 ### WR-129 — Reduce repetitive release verification and coordination
 
 - **Status:** Integrated and exercised in the authorized 1.0.9 release. Hosted application,
@@ -3896,9 +3906,242 @@ smallest useful outcome and acceptance boundary.
 
 ### WR-123 — Recover tiling when a formerly fixed-size window becomes resizable
 
+- **Maintainer live acceptance:** After installing structural candidate patch
+  `ae8c38868425f6ec2b0228ac1f6efdc59c0f4d09fdad4cb258cee4af21dc125a`, maintainer reported
+  “fixed!” for the edge-double-click recurrence and authorized release. This validates that
+  reported minimum-size case; broader resume-related recurrence monitoring remains open.
+
 - **Type:** User-observed tiling bug; source-backed recovery gap
-- **Status:** Unresolved recurrence in Stable 1.0.8 — Chrome on workspace 1 is incorrectly floating
-  in the user-provided report. The prior signed Codex rounding check did not establish a complete fix.
+- **1.0.9 resume recurrence (8 September):** Maintainer reports workspace M stopped sharing
+  tiled space after resume. Messages schema-3 report at `2026-09-08T10:42:48.630Z` shows
+  `1319:122` admitted normally, recovery inactive, tiled-tree participation true, and expected
+  frame matching the full side display `(-1200,30;1200x1890)`. The same report identifies Slack
+  `55190:13851` on workspace M as `automatically-floating-dialog`. Read-only AX checks confirm
+  both windows are standard and position/size settable; Slack remains at
+  `(-1200,978;1200x942)`, overlapping Messages. Messages briefly recovered from Accessibility
+  backoff during focus selection; it was no longer deferred at report capture. Slack's report
+  at `2026-09-08T11:45:29.331Z` confirms `fixed-size-standard-window`, seeded by
+  `frame-application/initial-size-write-ignored` at `08:01:53.203Z`. Requested frame was
+  `(-1200,954;1200x918)`; before/after stayed `(-1200,978;1200x942)`. Recovery remained
+  `size-unchanged` with no capability probe for over 3h43m despite fresh writable flags.
+  This establishes the sticky demotion mechanism: an ineffective resize removes Slack from
+  tiled participation, and recovery requires a size change before reconsideration. The report
+  does not establish why Slack ignored the initial resize or independently timestamp resume.
+  A bounded recovery path that does not require a prior size change needs a matching regression
+  while preserving protection for genuinely fixed-size dialogs; no runtime fix is claimed.
+  No restart, resize, classification change or speculative fix was performed. Evidence is saved
+  under `.build/Logs/wr123/recurrence-1.0.9/` in the isolated debug checkout.
+- **1.0.9 Chrome resize recurrence (8 September):** Maintainer reports the same failure after
+  resizing Chrome. Schema-3 report at `13:24:36.995Z` identifies `68416:18723` as fixed-size,
+  automatically floating and absent from the tiled tree. At `13:23:44.877Z`, frame application
+  requested `(1923,30;1917x1531)` from `(2079,30;1761x1531)`, but size remained unchanged:
+  `initial-size-write-ignored`. Fresh position/size flags are writable; recovery gate is
+  `size-unchanged`, with no probe. This independently captures the same demotion/recovery
+  mechanism for a 156-point width increase, unlike Slack's 24-point height decrease; it is
+  neither a one-point rounding case nor evidence confined to shrinking or resume.
+  A write during/just after manual resizing is a hypothesis; gesture method/timing and initial
+  event context are not recorded here (related history starts 50 seconds after demotion).
+  Preserve both fixtures for deterministic failure/recovery tests before any candidate release.
+  Report saved as `chrome-focused-window.txt` beside the Slack/Messages evidence above.
+- **Status:** Live validation — bounded operational recovery candidate implemented after explicit
+  install approval; subsequent maintainer resize testing failed live acceptance. Stable 1.0.9
+  remains affected; the initial native resize refusal and candidate recurrence are unresolved.
+- **Candidate recurrence, 8 September:** Maintainer resized Chrome repeatedly, observed loss of
+  tiling, and confirmed switching away and back restored it. The report at
+  `16:59:45.553Z` is after that restoration: Chrome `68416:18723` is managed-normal, in the
+  tiled tree, recovery inactive, with expected and observed frame `(0,30;1918x1531)` matching.
+  The workspace-1 switch at `16:59:35` solved two tiled windows and restored Chrome's position;
+  `write-result=position-only` means its size already matched the target. This report does not
+  retain the pre-switch failure, establish retry exhaustion, or prove operational recovery ran.
+  Evidence: `.build/wr123-candidate/recurrence/chrome-current.txt`. Source inspection confirms
+  background layout uses changes in an observed-state signature, while a workspace switch
+  performs a fresh layout. A stale background layout remains a hypothesis, not an established
+  cause. Next evidence must capture the affected window before switching workspace or restarting.
+  No further runtime change or installation is justified by this post-restoration snapshot alone.
+- **Pre-switch evidence, 8 September 17:05 UTC:** The new first report captures Claude
+  `69911:43887`, not Chrome, excluded from tiling after an ignored resize at `17:05:02.345Z`.
+  Three preceding interactions are logged as manual-move previews cancelled with
+  `released-without-target`; their restoration writes target `(1923,30;1917x1531)`.
+  Observed widths 2155, 2303 and 1410 all keep the right edge at 3840. The first two
+  restorations succeeded; the third ignored a width increase from 1410 to 1917 and caused
+  fixed-size demotion. Source confirms move cancellation restores original participant frames.
+  Maintainer confirmed dragging Claude's left edge to resize, establishing that a native resize
+  entered the manual-move path. The reason for the ignored AX write remains unproven.
+  At capture, two lifetime operational trials
+  were already consumed; the next trial was scheduled for `17:05:47.345Z`, so these reports
+  do not establish exhaustion or the outcome of that pending trial. The second report at
+  `17:05:21.607Z` shows Chrome correctly filling the display and Claude still floating after
+  a workspace switch; this switch did not restore the two-window layout. Reports retained in
+  `.build/wr123-candidate/recurrence/claude-before-switch-170504.txt` and
+  `chrome-after-switch-170521.txt`. Investigate move-versus-resize recognition before changing
+  the recovery policy again; the earlier stale-background-layout hypothesis is not needed to
+  explain this captured recurrence.
+- **Installed 8 September:** Local signed Release-configuration Dev candidate
+  `e9ba704c5f55-dirty` (local version 0.1.0/build 1, channel `dev`) is running from
+  `/Applications/WindowRanger.app`, PID 76827. Deep/strict signature verification passed;
+  installed and built bundles match across 70 files/symlinks, universal arm64/x86_64.
+  Accessibility is granted and management is unpaused. Active profile and profile library
+  are unchanged after normalizing unordered workspace-role dictionary encoding. Public
+  1.0.9/build 22 is retained at `/Applications/.WindowRanger.previous`; the older rollback
+  bundle was preserved separately before installation. No public release was made.
+  All 941 non-hosted tests passed; the final support-report trial count/next date/result fields
+  passed the 11 diagnostic tests. Runtime patch and verification evidence are retained under
+  `.build/wr123-candidate/`. Installed launch is not a live reproduction of automatic recovery.
+- **Candidate:** Ineffective-resize windows get at most three delayed size-only trials at their
+  current position, using a fresh 24-point shrink rather than the stale failed target. Actual
+  finite size change greater than one point and fresh post-trial normal/writable metadata are
+  required before reentry. Initial-capability fixed windows retain their original protection.
+  Lifetime trial counts survive re-demotion and are pruned when discovery removes the window.
+  Exhaustion does not disable the existing actual-size-change recovery path. Trial reads/writes
+  are suppressed during cooldown/exhaustion and guarded for hidden/Freeform/deferred/fullscreen,
+  read-only, paused, pointer/manual, startup, wake and topology states.
+- **Post-install recurrence: edge double-click, 8 September:** Maintainer reports the new candidate
+  still loses tiling and identifies double-clicking a window edge as the resize trigger.
+  Maintainer confirms Chrome; the edge and pre-recovery diagnostic remain pending.
+  This is user-observed failed acceptance. Source inspection shows `TiledResizePointerMonitor` forwards down/drag/up without
+  click count; the corrected classifier is used on the dragged-event preview path. A double-click
+  without a drag can therefore bypass that guard, with resize reconciliation/layout occurring
+  through refresh after button release. This identifies a coverage gap, not proof of the exact
+  failed write or classification transition in this recurrence. Preserve the installed state
+  and capture the report before choosing a further runtime change.
+- **Double-click Chrome report at 18:48:51 UTC:** Chrome `68416:18723` is managed-normal,
+  eligible and in the tiled tree, recovery inactive; observed and last-solved target are both
+  `(0,30;3840x1531)`. At `18:48:41`, the retained switch history shows two normal participants
+  (Chrome and Claude `69911:43887`) restored side by side at widths 1918 and 1917. Thus the
+  report contains a subsequent full-width layout target, not a current Chrome fixed-size
+  demotion. It does not retain the intervening layout/admission transition. Claude exclusion
+  remains a hypothesis pending its report; overlap and exact clicked edge also need confirmation.
+  Release logging uses in-memory support history, so there is no current-session disk log to
+  recover the missing transition. Evidence saved at
+  `.build/wr123-gesture-install/chrome-double-click-184851.txt`. No new runtime patch or install.
+- **Claude double-click follow-up at 18:50:07 UTC:** Claude `69911:43887` is excluded as
+  fixed-size after a new failure seeded at `18:49:57.206Z`: original/observed
+  `(3457,30;600x1531)`, requested `(3457,30;383x1531)`, initial-size-write-ignored.
+  This is later than Chrome's 18:48:51 report, so it confirms a recurrence mechanism rather
+  than timestamp-proving the cause of that earlier full-width target. The width refusal is
+  consistent with a 600-point minimum; the report does not independently prove that minimum.
+  `TiledLayoutEngine` uses a generic 120-point minimum plus a 0.1 split-ratio floor, allowing
+  the observed roughly 383-point slot in a 3840-point display with a 5-point gap.
+  `recoverIneffectiveResize` then converts an unchanged target write into whole-window fixed-size
+  admission without distinguishing an application minimum-size constraint. At capture, two
+  lifetime trials were consumed and the next was scheduled for 18:50:42, not exhausted.
+  Next deterministic regression should model a resizable window clamped at minimum width,
+  alongside a genuinely fixed-size window, before changing classification or layout constraints.
+  Evidence: `.build/wr123-gesture-install/claude-double-click-185007.txt`. No runtime edit/install.
+- **Structural correction, installed for live validation:** Maintainer approved minimum-size
+  allocation: an app refusing 500 points and accepting 600 retains its tiled slot, with the
+  neighbour receiving the remaining width after gaps. Normal admission now survives failed
+  target writes. `ManagedResizeConstraints` separates applied/constrained/deferred/unavailable
+  results, keeps per-axis provisional bounds for 30 seconds, and invalidates them on a smaller
+  observation. Refused growth does not invent a minimum; three automatic retries are bounded
+  without disabling layout membership. The BSP solver aggregates subtree minima/gaps and
+  preserves participants, matching frame-generation rounding. Infeasible layouts reuse only a
+  still-valid accepted layout, otherwise preserve actual sizes with position-only recovery and
+  clear automatic retries. Background layout/readback receives a shared retained correlation;
+  support reports expose last requested/observed sizes, bounds, outcome and retry exhaustion.
+  The integrated 3840-point/5-point-gap regression learns 600, gives Claude 600 and Chrome 3235,
+  and verifies the next readback succeeds. Nested constraints, impossible stale fallbacks,
+  delayed/missing readbacks, expiry, bounded retries and existing fixed-size protections are
+  covered. All 957 non-hosted tests passed in `.build/wr123-constraints/full-tests.log`.
+  Earlier targeted domains passed 117 tests before the final review fixes. Final independent
+  review found no remaining source-level blocker. The tests cover policy and
+  solver composition; they do not reproduce the full native AX event sequence. Signed build and
+  native repeated double-click/resize acceptance remain open.
+- **Structural candidate installation, 8 September:** With explicit approval, signed universal
+  Release-configuration Dev candidate was installed at `/Applications/WindowRanger.app` and
+  verified running as PID 97654. Accessibility remains granted and management unpaused.
+  Deep/strict signature verification passed; all 70 installed files/symlinks match the build;
+  source files remained unchanged during build and configuration is semantically unchanged.
+  Local version is 0.1.0/build 1, source `e9ba704c5f55-dirty`; exact patch SHA-256
+  `ae8c38868425f6ec2b0228ac1f6efdc59c0f4d09fdad4cb258cee4af21dc125a` distinguishes this candidate.
+  Evidence is under `.build/wr123-constraints-install/`. The immediately previous app is at
+  `/Applications/.WindowRanger.previous`; its older rollback was preserved separately at
+  `/Applications/.WindowRanger.previous-before-constraints-20260908-202141`.
+  The existing 957-test pass applies to these sources. No public release was made; live edge
+  double-click and minimum-size acceptance remain unverified.
+- **Open-source research, 8 September (subsequently approved above):** Rectangle separates capability/dialog
+  classification from requested-versus-actual frame mismatch, reports size constraints, and
+  keeps an oversized actual result on screen. See
+  https://github.com/rxhanson/Rectangle/blob/919fb7861a9f729fbbb9f893f2105a143f4f8540/Rectangle/WindowManager.swift
+  and `Rectangle/WindowMover/BestEffortWindowMover.swift` at that revision. Its documented
+  fallback can overlap neighbours, so it is not a complete tiling constraint solver.
+  Yabai's `src/window_manager.c` frame setter uses size-position-size and explicitly warns
+  against suppressing writes based on stale AX frame caches; the setter does not convert an
+  ignored write into floating admission. https://github.com/asmvik/yabai/blob/master/src/window_manager.c
+  AeroSpace revision `39e519044725694635712c739df9ca40ae78c5d1` similarly uses size-position-size
+  in `Sources/AppBundle/tree/MacApp.swift` without post-write verification in that setter;
+  its dialog heuristics are separate. Amethyst revision `6508ee2cacf8f9b357e1a3249a8f28ba5c94db2a`,
+  `Amethyst/Model/Window.swift`, documents tolerated frame mismatch for constrained windows to
+  avoid repeated assignments. Neither finding proves comprehensive minimum-size handling.
+  Proposed direction: keep admission separate from frame outcomes; retain tile membership on
+  uncertain writes; distinguish pending, constrained, unreachable and applied results; use
+  fresh settled readback and provisional per-window/per-axis constraints to solve neighbour
+  allocations. Preserve the last feasible layout if new constraints cannot fit; never silently
+  remove a participant. Treat double-click/drag/other external geometry changes through the
+  same reconciliation path. A single no-op does not establish a permanent minimum or fixed-size
+  status. Regression boundaries include constrained-but-resizable, genuine fixed-size, delayed
+  AX changes, growth refusal, repeated double-click and impossible layouts. Research authorizes
+  no new runtime implementation or installation.
+- **Gesture correction, installed 8 September:** `TiledManualDragClassifier` now defers a mismatched
+  pointer sample when changed dimensions leave all other edges stationary, instead of treating
+  the resize's origin change as a move. A later matching sample can begin a resize; existing
+  post-release reconciliation can adopt an unclaimed native resize. Captured Claude geometry
+  with modeled pointer offsets reproduced seven failing assertions before the guard. After it,
+  all 93 tests across `TiledResizePreviewTests`, `TiledLayoutTreeTests` and
+  `MoveWindowFocusTests` passed, including title-bar movement with transient size noise.
+  Logs: `.build/wr123-candidate/resize-gesture-before.log` and `resize-gesture-after.log`.
+  The pointer offsets are injected hypotheses, not coordinates retained by the live report.
+  The extended tree-adoption regression passed for all three Claude samples. Independent review
+  found no blocker. A position update arriving before its matching size update can still appear
+  to be a move; that separate AX sampling case is not covered by this geometry guard.
+  Final top-left corner coverage passed with all 22 preview tests in
+  `.build/wr123-candidate/resize-gesture-final.log` (94 distinct tests across the three domains).
+  With explicit install approval, all 944 non-hosted tests passed and the signed universal
+  Release-configuration Dev candidate was installed at `/Applications/WindowRanger.app`,
+  verified running as PID 91355 with Accessibility granted and management unpaused. All 70
+  bundle files/symlinks match the build; configuration is semantically unchanged after
+  normalizing encoded dictionary ordering. Evidence is under `.build/wr123-gesture-install/`;
+  source patch SHA-256 is `010d32cd81575262f3832b1b921fd1443fb96b285b574dfa26d4e5198f956d2d`.
+  Version remains local 0.1.0/build 1, source marker `e9ba704c5f55-dirty`; use the retained patch
+  to distinguish it from the preceding candidate. That candidate is at
+  `/Applications/.WindowRanger.previous`; the older Stable rollback was preserved at
+  `/Applications/.WindowRanger.previous-before-gesture-20260908-194145`.
+  Repeated native left-edge resize acceptance remains open; no public release was made.
+- **Candidate verification:** All 941 non-hosted tests pass, including positive shared-policy
+  tests for both captured geometries and ignored-then-responsive behavior, misleading writable
+  flags, no-write guards, three-trial exhaustion and reseeding. No expected failures remain.
+  Independent source review found and verified fixes for discovery cleanup and topology/pointer
+  guards; no remaining source-level safety blocker. Full native engine/cache interleaving and
+  delayed-resume acceptance remain unverified after local installation.
+- **8 September deterministic investigation:** Injected AX callbacks reproduce each captured
+  no-op write through the production bounded-observation, frame-write, admission and recovery
+  policy functions. A modeled endpoint becomes writable after the observation window but remains
+  blocked at the unchanged-size gate after three hours. The unannotated test run produced exactly
+  two failing assertions, one per app, among 219 selected tests. Both failures were explicitly
+  tracked with strict `XCTExpectFailure` during investigation, then replaced by candidate recovery
+  tests. A control
+  confirms genuinely fixed-size surfaces with misleading writable flags would also be admitted
+  by simply bypassing the gate. The actual Chrome geometry is accepted by the pure manual-resize
+  tree algorithm, preserving width 1761 rather than restoring the prior equal split.
+- **Source trace:** Native resize completion and ordinary background layout share `applyFrameChanges`.
+  The former clears its preview session before applying frames; the latter observes mouse state
+  earlier in the refresh. Neither the retained report nor the current injected test seam records
+  the native gesture/app transaction at the initial failure. A write during/just after the gesture
+  is plausible, not reproduced. No commit, push or public release was made for this candidate.
+- **Next acceptance:** Separate an operational no-op from authoritative non-resizable capability.
+  Investigate a bounded size-only retry after interaction/lifecycle settling, confirming an actual
+  size response before layout reentry and retaining position protection for genuine dialogs.
+  Test exhausted retries, paused/hidden/deferred windows, current-target recomputation and native
+  resize ordering; then validate one signed candidate against a deliberately induced refusal and
+  real resume. Do not claim the initial native cause or complete fix from the modeled recovery test.
+  Raw and annotated test logs are in the tooling-followup worktree's `.build/wr123-investigation/`.
+- **Historical investigation verification:** Window Admission Fixture, Tiled Layout Tree and Workspace Definition:
+  219 tests, two explicitly expected WR-123 failures, zero unexpected failures on the annotated
+  run. Non-hosted isolation and diff checks passed. The candidate's full-suite result supersedes
+  this baseline; signed/native interaction and resume validation are separate checkpoints.
+  Review confirmed the geometry test's model-only scope. The recovery fixture composes policy
+  functions; it does not exercise the complete engine cache transition. That integrated coverage
+  remains required for a candidate fix. Expected failures use XCTest's default strict matching.
 - **1.0.8 Chrome evidence:** Focused report at 2026-09-05T17:01:22.529Z identifies Chrome
   `68416:18723`, standard AX window at `(4,34,956,1531)`, with fresh position/size writable flags
   true, no exclusion, automatic override and unpaused management. Admission is retained as

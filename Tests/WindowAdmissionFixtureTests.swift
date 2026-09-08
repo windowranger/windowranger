@@ -171,6 +171,235 @@ final class WindowAdmissionFixtureTests: XCTestCase {
         )
     }
 
+    func testIneffectiveResizeOperationalRecoveryIsBoundedAndRequiresObservedSizeChange() {
+        let start = Date(timeIntervalSinceReferenceDate: 100)
+        let core = fixtureMetadata(subrole: kAXStandardWindowSubrole as String)
+        var recovery = FixedSizeRecoveryState.seeded(
+            observedSize: CGSize(width: 1_200, height: 942),
+            reason: .ineffectiveResize,
+            now: start
+        )
+
+        XCTAssertEqual(recovery.operationalRecoveryGate(
+            coreMetadata: core,
+            isVisibleActive: true,
+            isPaused: false,
+            now: start.addingTimeInterval(4)
+        ), .cooldown)
+        XCTAssertEqual(recovery.operationalRecoveryGate(
+            coreMetadata: core,
+            isVisibleActive: true,
+            isPaused: false,
+            now: start.addingTimeInterval(5)
+        ), .eligible)
+
+        var observedSize = CGSize(width: 1_200, height: 942)
+        let firstResult = recovery.attemptOperationalProbe(
+            coreMetadata: core,
+            isVisibleActive: true,
+            isPaused: false,
+            isWriteAllowed: true,
+            hasAffirmativeCapabilities: true,
+            currentSize: observedSize,
+            targetSize: WorkspaceEngine.operationalResizeProbeSize(for: observedSize),
+            now: start.addingTimeInterval(5),
+            writeSize: { _ in true },
+            observeSize: { observedSize }
+        )
+        XCTAssertEqual(firstResult, .sizeUnchanged)
+        XCTAssertEqual(recovery.operationalProbeCount, 1)
+        XCTAssertEqual(recovery.lastOperationalProbeResult, "size-unchanged")
+        XCTAssertEqual(recovery.operationalRecoveryGate(
+            coreMetadata: core,
+            isVisibleActive: true,
+            isPaused: false,
+            now: start.addingTimeInterval(19)
+        ), .cooldown)
+        XCTAssertEqual(recovery.operationalRecoveryGate(
+            coreMetadata: core,
+            isVisibleActive: true,
+            isPaused: false,
+            now: start.addingTimeInterval(20)
+        ), .eligible)
+
+        let secondResult = recovery.attemptOperationalProbe(
+            coreMetadata: core,
+            isVisibleActive: true,
+            isPaused: false,
+            isWriteAllowed: true,
+            hasAffirmativeCapabilities: true,
+            currentSize: observedSize,
+            targetSize: WorkspaceEngine.operationalResizeProbeSize(for: observedSize),
+            now: start.addingTimeInterval(20),
+            writeSize: { target in observedSize = target; return true },
+            observeSize: { observedSize }
+        )
+        XCTAssertEqual(secondResult, .sizeChanged)
+        XCTAssertEqual(recovery.operationalProbeCount, 2)
+        XCTAssertEqual(recovery.lastOperationalProbeResult, "size-changed")
+        XCTAssertNotNil(recovery.nextOperationalProbeDate)
+    }
+
+    func testIneffectiveResizeOperationalRecoveryKeepsFixedAndInitialCapabilityGuards() {
+        let start = Date(timeIntervalSinceReferenceDate: 100)
+        let normal = fixtureMetadata(subrole: kAXStandardWindowSubrole as String)
+        let fixed = fixtureMetadata(
+            subrole: kAXStandardWindowSubrole as String,
+            positionSettable: .trueValue,
+            sizeSettable: .falseValue
+        )
+        let initialCapability = FixedSizeRecoveryState.seeded(
+            observedSize: CGSize(width: 400, height: 300),
+            now: start
+        )
+        XCTAssertEqual(initialCapability.operationalRecoveryGate(
+            coreMetadata: normal,
+            isVisibleActive: true,
+            isPaused: false,
+            now: start.addingTimeInterval(60)
+        ), .notOperationalRecovery)
+
+        var ineffective = FixedSizeRecoveryState.seeded(
+            observedSize: CGSize(width: 400, height: 300),
+            reason: .ineffectiveResize,
+            now: start
+        )
+        XCTAssertEqual(ineffective.operationalRecoveryGate(
+            coreMetadata: normal,
+            isVisibleActive: false,
+            isPaused: false,
+            now: start.addingTimeInterval(60)
+        ), .notVisibleActive)
+        XCTAssertEqual(ineffective.operationalRecoveryGate(
+            coreMetadata: normal,
+            isVisibleActive: true,
+            isPaused: true,
+            now: start.addingTimeInterval(60)
+        ), .managementPaused)
+        XCTAssertEqual(ineffective.operationalRecoveryGate(
+            coreMetadata: fixed,
+            isVisibleActive: true,
+            isPaused: false,
+            now: start.addingTimeInterval(60)
+        ), .eligible, "Capability flags are a write gate, not a recovery signal")
+
+        for delay in [5.0, 20.0, 65.0] {
+            _ = ineffective.attemptOperationalProbe(
+                coreMetadata: normal,
+                isVisibleActive: true,
+                isPaused: false,
+                isWriteAllowed: true,
+                hasAffirmativeCapabilities: false,
+                currentSize: CGSize(width: 400, height: 300),
+                targetSize: CGSize(width: 376, height: 300),
+                now: start.addingTimeInterval(delay),
+                writeSize: { _ in XCTFail("Capability rejection must not write"); return false },
+                observeSize: { nil }
+            )
+        }
+        XCTAssertEqual(ineffective.operationalRecoveryGate(
+            coreMetadata: normal,
+            isVisibleActive: true,
+            isPaused: false,
+            now: start.addingTimeInterval(600)
+        ), .exhausted)
+    }
+
+    func testOperationalResizeProbeUsesCurrentSafeSize() {
+        XCTAssertEqual(
+            WorkspaceEngine.operationalResizeProbeSize(for: CGSize(width: 1_200, height: 942)),
+            CGSize(width: 1_176, height: 942)
+        )
+        XCTAssertEqual(
+            WorkspaceEngine.operationalResizeProbeSize(for: CGSize(width: 128, height: 180)),
+            CGSize(width: 128, height: 156)
+        )
+        XCTAssertNil(WorkspaceEngine.operationalResizeProbeSize(for: CGSize(width: 128, height: 128)))
+    }
+
+    func testCapturedIgnoredWritesRecoverOnlyAfterOperationalSizeResponse() {
+        let cases: [(CGSize, CGSize)] = [
+            (CGSize(width: 1200, height: 942), CGSize(width: 1200, height: 918)),
+            (CGSize(width: 1761, height: 1531), CGSize(width: 1917, height: 1531)),
+        ]
+        let core = fixtureMetadata(subrole: kAXStandardWindowSubrole as String)
+        let start = Date(timeIntervalSinceReferenceDate: 100)
+        for (original, requested) in cases {
+            var observed = original
+            let failedWrite = AccessibilityWindow.applyFrameWriteSequenceResult(
+                writeSize: { true },
+                writePosition: { XCTFail("An ignored initial write must not move the window"); return false },
+                initialSizeWriteWasIgnored: {
+                    AccessibilityWindow.successfulSizeWriteWasIgnored(
+                        originalSize: original, targetSize: requested,
+                        observeSize: { observed }, retrySizeWrite: { true }, pause: {}
+                    )
+                }
+            )
+            XCTAssertEqual(failedWrite, .initialSizeWriteIgnored)
+            XCTAssertEqual(AccessibilityWindow.fixedSizeDecisionAfterIneffectiveResize(core),
+                           decision(.managedDialog, .fixedSizeStandardWindow))
+            var state = FixedSizeRecoveryState.seeded(
+                observedSize: original, reason: .ineffectiveResize, now: start
+            )
+            // The endpoint becomes responsive without changing its size first. Production's
+            // shared trial policy must now obtain actual size evidence, not just trust flags.
+            XCTAssertEqual(state.attemptOperationalProbe(
+                coreMetadata: core, isVisibleActive: true, isPaused: false,
+                isWriteAllowed: true, hasAffirmativeCapabilities: true,
+                currentSize: original, targetSize: WorkspaceEngine.operationalResizeProbeSize(for: original),
+                now: start.addingTimeInterval(10800),
+                writeSize: { observed = $0; return true }, observeSize: { observed }
+            ), .sizeChanged)
+            XCTAssertFalse(AccessibilityWindow.sizesMatch(observed, original))
+        }
+    }
+
+    func testMisleadingWritableFlagsExhaustTrialsAndDoNotRearmOnRedemotion() {
+        let core = fixtureMetadata(subrole: kAXStandardWindowSubrole as String)
+        let start = Date(timeIntervalSinceReferenceDate: 100)
+        let size = CGSize(width: 1200, height: 942)
+        var state = FixedSizeRecoveryState.seeded(observedSize: size, reason: .ineffectiveResize, now: start)
+        var writes = 0
+        for seconds in [5.0, 20, 65, 10800] {
+            let result = state.attemptOperationalProbe(
+                coreMetadata: core, isVisibleActive: true, isPaused: false,
+                isWriteAllowed: true, hasAffirmativeCapabilities: true,
+                currentSize: size, targetSize: WorkspaceEngine.operationalResizeProbeSize(for: size),
+                now: start.addingTimeInterval(seconds),
+                writeSize: { _ in writes += 1; return true }, observeSize: { size }
+            )
+            XCTAssertEqual(result, seconds == 10800 ? .notEligible : .sizeUnchanged)
+        }
+        XCTAssertEqual(writes, 3)
+        let reseeded = FixedSizeRecoveryState.seeded(
+            observedSize: size, reason: .ineffectiveResize,
+            operationalProbeCount: state.operationalProbeCount, now: start
+        )
+        XCTAssertEqual(reseeded.operationalRecoveryGate(
+            coreMetadata: core, isVisibleActive: true, isPaused: false,
+            now: start.addingTimeInterval(20000)
+        ), .exhausted)
+    }
+
+    func testOperationalProbeGuardsNeverInvokeWriteCallbacks() {
+        let core = fixtureMetadata(subrole: kAXStandardWindowSubrole as String)
+        let start = Date(timeIntervalSinceReferenceDate: 100)
+        let size = CGSize(width: 1200, height: 942)
+        for (visible, paused, writesAllowed) in [(false, false, true), (true, true, true), (true, false, false)] {
+            var state = FixedSizeRecoveryState.seeded(observedSize: size, reason: .ineffectiveResize, now: start)
+            XCTAssertEqual(state.attemptOperationalProbe(
+                coreMetadata: core, isVisibleActive: visible, isPaused: paused,
+                isWriteAllowed: writesAllowed, hasAffirmativeCapabilities: true,
+                currentSize: size, targetSize: WorkspaceEngine.operationalResizeProbeSize(for: size),
+                now: start.addingTimeInterval(60),
+                writeSize: { _ in XCTFail("Ineligible trials must not write"); return false },
+                observeSize: { XCTFail("Ineligible trials must not probe"); return nil }
+            ), .notEligible)
+            XCTAssertEqual(state.operationalProbeCount, 0)
+        }
+    }
+
     func testFixedSizeRecoveryRequiresAChangedObservedSizeAfterCooldown() {
         let start = Date(timeIntervalSinceReferenceDate: 100)
         let state = FixedSizeRecoveryState.seeded(
