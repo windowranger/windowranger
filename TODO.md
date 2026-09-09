@@ -20,6 +20,25 @@ smallest useful outcome and acceptance boundary.
 
 ## Done
 
+### WR-131 — Release WindowRanger 1.0.10
+
+- **Status:** Done — Stable 1.0.10/build 24 published on 2026-09-09 at immutable
+  `2a3436d09d01891926f7b26a0d359dc4a96932cc`; build 23 remains superseded and unpublished.
+- **Acceptance:** Maintainer accepted the exact DMG keyboard-resize behavior ("all good").
+  All 71 installed entries matched the ZIP and export; Accessibility and settings were preserved.
+  All 963 local tests, hosted integration tests/analysis/unsigned packaging, Developer ID signing,
+  app/DMG notarization, Gatekeeper and downloaded GitHub asset verification passed.
+- **Channels:** Website PR #27 deployed `e638a0e4021f4a41b06567303428a8bf12f4688a`;
+  both domains' homepage/feed bytes and all 57 feed enclosures per domain verified. Homebrew
+  PR #9 merged `217924d6e90440ef382d35671309ad37b09c6c98`; candidate and final named-tap
+  style/online audits passed. Source ledger PR #137 records build 24 as published.
+- **Tooling:** The initial channel run failed on an undefined appcast copy destination.
+  Corrected tooling `647962cbe6093fcbe1f469e807de534345a27495` passed 28 coordinator tests;
+  the recovered channel run completed in 266 seconds, retaining the original run evidence.
+  This is recovery timing, not uninterrupted release timing or evidence of token savings.
+- **Follow-ups:** Intermittent resume monitoring remains under WR-123; the unrelated CI
+  peer-rejection process exit remains under WR-132. Release acceptance does not close either.
+
 ### WR-130 — Publish and time Stable 1.0.9
 
 - **Result:** Stable 1.0.9/build 22 is public and immutable at source
@@ -3870,50 +3889,6 @@ smallest useful outcome and acceptance boundary.
 
 ## Live validation
 
-### WR-131 — Release WindowRanger 1.0.10
-
-- **Status:** Build 24 is signed, notarized and installed from the exact DMG. The maintainer
-  confirmed packaged-app resizing works on 2026-09-09 ("all good"). Publication is in progress.
-  Build 23 is superseded and remains unpublished.
-- **Scope:** Publish the WR-123 minimum-size and inward-growth correction as Stable 1.0.10/build 24,
-  with immutable signed/notarized artifacts, exact-package verification, feed/site and tap updates.
-- **Acceptance evidence:** Maintainer reported the edge-double-click failure fixed in the installed
-  structural candidate. Its exact source passed all 957 non-hosted tests. Broader resume
-  recurrence monitoring remains open under WR-123.
-- **Completed:** PRs #131/#132 promoted source to main `1c0ab4ed4f86`; PR #133 back-merged
-  Stable into develop. All 957 distribution tests, static analysis, signed archive/export,
-  app/DMG notarization, Gatekeeper and local asset verification passed. The exact DMG app
-  was installed as 1.0.10/build 23; all 71 package files matched the export, settings were
-  preserved, and Accessibility permission was restored after switching signing identities.
-- **New evidence:** During final packaged-app testing, the maintainer reported that resizing
-  Chrome with keys becomes confused on Claude. The precise key sequence, visible outcome,
-  are now supported by captured Debug diagnostics. At 20:08:16.830Z (sequence 818),
-  Claude remained at x=2473,width=1367 when requested x=2423,width=1417. The writer
-  returned `initial-size-write-ignored` before attempting position. Chrome accepted its
-  paired shrink. All 49 keyboard commands targeted Chrome; Claude had 27 deferred
-  resize readbacks, retained membership, and no learned minimum. The likely mechanism
-  is size-first growth against the display's right edge: moving left would make room,
-  but the early no-op return prevents that move. Native move-first confirmation and a
-  deterministic regression remain pending; the earlier minimum-share feedback hypothesis
-  does not explain this captured failure.
-  At the maintainer's request, the same source `1c0ab4ed4f86` was installed as the separate
-  signed Debug app. All 71 installed files matched its build; Accessibility was granted and
-  only WindowRanger Dev was running. Current profiles/shortcuts were copied into backed-up
-  Debug settings; semantic comparison preserved profiles and display bindings, with only
-  Debug's expected iCloud/Open-at-Login restrictions. Fresh persistent diagnostics are active
-  under session `CA2A4F16-C382-47B5-B204-16A807B1FCB4`.
-- **Build 24 evidence:** The maintainer accepted the installed Debug inward-growth correction
-  ("perfect!"). All 963 local non-hosted tests passed; PRs #134/#135 promoted the correction
-  to main `2a3436d09d01`, and #136 back-merged Stable history into develop. Distribution build,
-  analysis, app/DMG notarization, Gatekeeper and local asset verification passed in 344 seconds.
-  The exact DMG app is installed as 1.0.10/build 24. All 71 entries match the export and ZIP;
-  Accessibility is granted, management is unpaused, and preferences are semantically preserved.
-  PR #134's intermittent CLI test-process exit passed a failed-job rerun and 50 local repetitions;
-  its unresolved cause is tracked separately under WR-132.
-- **Remaining:** Publish and verify the immutable tag, GitHub assets, feed/site and tap.
-  Build 23 artifacts remain preserved. Hosted integration tests, analysis, unsigned Release
-  and DMG smoke checks also passed for the exact build 24 release commit.
-
 ### WR-129 — Reduce repetitive release verification and coordination
 
 - **Status:** Integrated and exercised in the authorized 1.0.9 release. Hosted application,
@@ -3941,8 +3916,9 @@ smallest useful outcome and acceptance boundary.
   now uses the explicit public directory; all 28 focused coordinator tests pass, including a
   real temporary-directory copy regression. Recovery uses separately bound tooling while
   retaining the original journal, partial worktree and immutable app artifacts.
-- **Remaining boundary:** Finish and verify the 1.0.10 channel recovery. Instructions are in
-  the release runbook; the original run was not an uninterrupted end-to-end success.
+- **Recovery evidence:** The 1.0.10 recovery completed every channel checkpoint in 266 seconds,
+  with both domains and Homebrew verified. The original run still required a tooling correction;
+  uninterrupted release timing and token savings remain unproven.
 
 ### WR-126 — Preserve the focused diagnostic report through menu closure
 
