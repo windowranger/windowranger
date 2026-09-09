@@ -333,6 +333,18 @@ smallest useful outcome and acceptance boundary.
 
 ## Inbox
 
+### WR-132 — Investigate intermittent CLI peer-rejection test exit
+
+- **Status:** CI-observed test-process exit; cause unconfirmed.
+- **Evidence:** PR #134 run `34279133880` initially exited during
+  `CLIIPCTransportTests.testPeerRejectionClosesWithoutReturningDetails`; its failed-job
+  rerun passed. The complete local suite passed 963 tests, and 50 isolated repetitions
+  of the rejection test passed. The hosted log did not identify a signal or backtrace.
+- **Investigation:** Inspect socket-write behavior when the peer closes before the request
+  arrives; SIGPIPE is a source-supported hypothesis, not a reproduced diagnosis.
+- **Acceptance:** Reproduce the exit deterministically, confirm its cause, and verify any
+  correction in client/server disconnect tests without weakening peer rejection.
+
 ### WR-125 — Investigate CLI peer-rejection process exit
 
 - **Type:** CI-observed transport reliability failure
@@ -3860,8 +3872,9 @@ smallest useful outcome and acceptance boundary.
 
 ### WR-131 — Release WindowRanger 1.0.10
 
-- **Status:** Corrected release explicitly authorized after maintainer live acceptance. Build 23
-  is superseded and remains unpublished; build 24 is allocated for fresh promotion and packaging.
+- **Status:** Build 24 is signed, notarized and installed from the exact DMG. The maintainer
+  confirmed packaged-app resizing works on 2026-09-09 ("all good"). Publication is in progress.
+  Build 23 is superseded and remains unpublished.
 - **Scope:** Publish the WR-123 minimum-size and inward-growth correction as Stable 1.0.10/build 24,
   with immutable signed/notarized artifacts, exact-package verification, feed/site and tap updates.
 - **Acceptance evidence:** Maintainer reported the edge-double-click failure fixed in the installed
@@ -3889,10 +3902,17 @@ smallest useful outcome and acceptance boundary.
   Debug settings; semantic comparison preserved profiles and display bindings, with only
   Debug's expected iCloud/Open-at-Login restrictions. Fresh persistent diagnostics are active
   under session `CA2A4F16-C382-47B5-B204-16A807B1FCB4`.
-- **Remaining:** Promote the live-accepted WR-123 correction and re-establish exact
-  packaged acceptance before publication. No v1.0.10 tag, GitHub release, feed, site or tap
-  publication has been performed. Any product correction requires a fresh allocated build
-  and newly notarized artifacts; build 23 must not be silently replaced.
+- **Build 24 evidence:** The maintainer accepted the installed Debug inward-growth correction
+  ("perfect!"). All 963 local non-hosted tests passed; PRs #134/#135 promoted the correction
+  to main `2a3436d09d01`, and #136 back-merged Stable history into develop. Distribution build,
+  analysis, app/DMG notarization, Gatekeeper and local asset verification passed in 344 seconds.
+  The exact DMG app is installed as 1.0.10/build 24. All 71 entries match the export and ZIP;
+  Accessibility is granted, management is unpaused, and preferences are semantically preserved.
+  PR #134's intermittent CLI test-process exit passed a failed-job rerun and 50 local repetitions;
+  its unresolved cause is tracked separately under WR-132.
+- **Remaining:** Publish and verify the immutable tag, GitHub assets, feed/site and tap.
+  Build 23 artifacts remain preserved. Hosted integration tests, analysis, unsigned Release
+  and DMG smoke checks also passed for the exact build 24 release commit.
 
 ### WR-129 — Reduce repetitive release verification and coordination
 
@@ -3916,8 +3936,13 @@ smallest useful outcome and acceptance boundary.
   focused coordinator tests pass; the website's five rendered-output tests also pass.
   Build and notarization took 5m21s, but the complete release exceeded the previous 43m01s
   because of CI/tooling repairs and channel adaptation. No token-savings claim is supported.
-- **Remaining boundary:** A future authorized release must exercise the corrected coordinator
-  end to end without the manual React fallback. Instructions are in the release runbook.
+- **1.0.10 finding:** The coordinator reached feed generation but failed copying its verified
+  appcast because the extracted helper referenced an undefined destination variable. The copy
+  now uses the explicit public directory; all 28 focused coordinator tests pass, including a
+  real temporary-directory copy regression. Recovery uses separately bound tooling while
+  retaining the original journal, partial worktree and immutable app artifacts.
+- **Remaining boundary:** Finish and verify the 1.0.10 channel recovery. Instructions are in
+  the release runbook; the original run was not an uninterrupted end-to-end success.
 
 ### WR-126 — Preserve the focused diagnostic report through menu closure
 
